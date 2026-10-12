@@ -1,0 +1,106 @@
+name: Ordinary CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main, test-agent-workflow]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ordinary-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Record source and tooling
+        run: |
+          git rev-parse HEAD
+          node --version
+          npm --version
+      - name: Install locked dependencies
+        id: install
+        run: npm ci
+      - name: Typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run typecheck
+      - name: Run unit tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm test
+      - name: Measure coverage
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run test:coverage
+      - name: Bound coverage evidence to 128 KiB
+        id: evidence
+        if: ${{ !cancelled() && hashFiles('frontend/coverage/coverage-summary.json') != '' }}
+        run: test "$(wc -c < coverage/coverage-summary.json)" -le 131072
+      - name: Upload coverage summary
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: frontend/coverage/coverage-summary.json
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
+
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.13'
+      - name: Record source and tooling
+        run: |
+          git rev-parse HEAD
+          python --version
+          python -m pip --version
+      - name: Install pinned dependencies
+        id: install
+        run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m pytest
+      - name: Measure coverage
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m pytest --cov=app --cov-report=term-missing --cov-report=json
+      - name: Bound coverage evidence to 128 KiB
+        id: evidence
+        if: ${{ !cancelled() && hashFiles('backend/coverage/coverage.json') != '' }}
+        run: test "$(wc -c < coverage/coverage.json)" -le 131072
+      - name: Upload coverage report
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-coverage-${{ github.sha }}
+          path: backend/coverage/coverage.json
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
