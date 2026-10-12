@@ -1,9 +1,10 @@
-# T02 trusted contracts and proposal policy
+# Trusted test-agent boundaries (T02 and T03)
 
 This package uses only the Python standard library. It parses model proposals,
 checks trusted context and test-edit policy, and constructs immutable changes.
-It does not write edits, execute commands/tests, load skills, contact providers
-or GitHub, collect diffs, or publish results. Run its focused tests from the root:
+T02 does not write edits, execute commands/tests, load skills, contact providers,
+or publish results. T03 adds bounded GitHub reads and context collection. Run
+the automation tests from the root:
 
 ```sh
 backend/.venv/bin/python -m pytest automation/tests -q
@@ -132,4 +133,95 @@ emptying and semantic weakening can escape detection. They also conservatively
 reject refactors reducing test declaration count and tests using unrecognized
 custom assertion/test APIs. Future sandboxed verification and human review are
 still required. Runtime/provider selection, a writer, a verifier, CI integration
-and GitHub publication remain outside T02.
+and GitHub publication remain outside T02/T03.
+
+## T03 exact PR context
+
+`context.collect_context(reader, run_id=..., workflow_id=...,
+expected_head_sha=..., policy_sha=...)` accepts trusted caller inputs, using a
+fresh `github.GitHubReader(expected_repository, transport)` for each collection.
+The policy SHA identifies the trusted host code/configuration, never PR text.
+The bundle contains the T02 `SourceIdentity` plus numeric repository, workflow,
+run and attempt identities. It supplies evidence; it never decides whether
+behavior requires tests and contains no agent, provider, writer or verifier.
+
+The reader exposes workflow/PR metadata, exact-commit PR associations,
+paginated PR files, exact-SHA compares, commit/tree inventory and Git blobs.
+`GitHubHTTPTransport(token=None)` uses HTTPS GET exclusively to
+`api.github.com`, a 10-second socket timeout, fixed endpoint/query grammar,
+bounded responses and no redirects. Credentials are explicitly injected;
+environment variables, credential files and repository URLs are never read.
+Pagination consumes only the next-page indication and constructs its own page
+parameters. Tests inject deterministic responses and require neither network
+nor credentials. T03 has not been smoke-tested against the live API.
+
+Collection requires one open same-repository PR with the run's exact head.
+Repository names and numeric IDs must agree for run, base and head; forks,
+missing/duplicate/ambiguous associations and malformed metadata fail closed.
+Metadata is checked again at the end to catch PR changes during collection.
+GitHub does not provide atomic multi-request snapshots; later use must
+revalidate the identity again.
+
+The base-to-head compare pins the merge-base. A second merge-base-to-head
+compare supplies the file records, cross-checked against the first compare and
+every paginated PR file. Counts, names, statuses, rename predecessors and blob
+SHAs must agree. Commit evidence must reach the exact head. The changed-file
+limit is below GitHub's compare-file ceiling; comparisons over 250 commits,
+truncated tree inventories and unsupported file statuses fail closed.
+
+Removed files have historical content only; renames retain both names and the
+predecessor at the exact merge-base. Content comes from the pinned commit's
+tree, with blob SHA/size and Git blob digest validation. Symlinks, submodules
+and executable file modes are not read as source. Missing patches stay missing;
+hunk/count checks identify insufficient patches without fabricating text.
+Oversized, binary and unsupported evidence has explicit states. Secret-shaped
+paths such as `.env` are excluded, including their patches. Other paths outside
+the source/test/config allowlists retain change metadata without content.
+
+Host constants bound collection:
+
+| Resource | Limit |
+| --- | --- |
+| Changed files / pages per list | 100 / 4 (30 entries per page) |
+| Patch / source / existing test per file | 16 / 64 / 32 KiB |
+| Config or fixture per file | 16 KiB |
+| Complete context, including canonical JSON | 512 KiB |
+| Selected tests / permitted test paths | 16 / 32 |
+| Test reference scan | 64 files, 256 KiB |
+| Config and fixture files combined | 8 |
+| Tree inventory / compare commit evidence | 4,000 entries / 250 commits |
+| GitHub reads / response / total response bytes | 160 / 1 MiB / 8 MiB |
+
+Only changed frontend TS/TSX, backend Python, existing tests and fixed known
+test configuration/fixtures supply textual evidence. No imports are followed
+for source collection. A bounded scan of known test paths finds named,
+colocated, same-feature/module and lexical module-reference relationships.
+Reasons are host-generated and recorded per test; matching text remains
+untrusted data and is not proof of coverage. Named/reference tests take priority
+over broader directory matches. Test-count omissions and unreadable reference
+evidence have explicit markers; inventory/scan/total budget exhaustion fails
+closed. No missing evidence means “no tests needed.”
+
+Configuration paths are fixed: frontend Vite/setup, backend pyproject/conftest
+and root pytest.ini. Fixtures are limited to the repository's known frontend
+todoFixture and backend mocks, selected only when referenced by chosen tests
+or configuration. These files are data, even when they contain instructions.
+AGENTS, README, skill-looking files, PR bodies and arbitrary URLs cannot change
+limits, select credentials, register skills or cause execution.
+
+`ContextBundle.to_bytes()` emits canonical UTF-8 JSON with sorted keys/paths,
+schema, source/run identity, evidence states, reasons, limits and usage;
+`sha256` hashes those bytes. No local absolute paths or authentication are
+serialized. `bundle.trusted_context(repository_root)` supplies immutable
+changed/current paths and permitted test paths to unchanged T02 validation.
+Candidates include readable selected tests and missing named tests for readable
+changed source. They confer no test-required decision. The caller must prepare
+and independently validate an exact-head checkout before later T02 filesystem
+checks; the bridge does not verify checkout identity.
+
+`automation/tests/t03_fixtures.py:sample_bytes()` generates a sanitized,
+reproducible frontend/backend handoff sample from the same fixtures as the tests.
+Collection never reads the local checkout, imports PR code, runs application
+tests, evaluates text, follows source-selected URLs or changes any files.
+Reference/coverage inference, broader layouts, provider/runtime selection,
+verification, CI integration and publication remain future tasks.
