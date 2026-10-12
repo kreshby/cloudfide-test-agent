@@ -19,22 +19,23 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from .scenarios import SCENARIOS, messages
+from .scenarios import SCENARIOS, SYSTEM_PROMPT, messages
 from .scoring import Inference, MAX_RESPONSE_BYTES, aggregate, score
 
 
 LLAMA_TAG = "v0.6.0"
 LLAMA_COMMIT = "d81235049384534c167caea52b85a694f6103d14"
 LLAMA_URL = "https://github.com/ggml-org/llama.cpp.git"
+BENCHMARK_REVISION = "P01-R2"
 THREADS = 4
 CONTEXT_TOKENS = 8192
-OUTPUT_TOKENS = 1536
+OUTPUT_TOKENS = 512  # R2 section 9 fallback: 768 / 120 cannot fit all phase bounds.
 SEED = 42
 SETUP_SECONDS = 420
 ACQUISITION_SECONDS = 180
 STARTUP_SECONDS = 90
 INFERENCE_SECONDS = 90
-TOTAL_SECONDS = 2580  # 43 minutes, inside the workflow's 45-minute timeout.
+TOTAL_SECONDS = 2640  # 44 minutes: 2580 phase bounds + 60 overhead; 60 left for workflow.
 SOCKET_SECONDS = 10
 CAPTURE_BYTES = 16 * 1024  # Per stdout/stderr stream; excess is drained/discarded.
 HTTP_BYTES = 128 * 1024
@@ -537,6 +538,7 @@ def main():
     deadline = started + TOTAL_SECONDS
     results = {
         "schema_version": 1, "purpose": "P01-selection-evidence-only",
+        "benchmark_revision": BENCHMARK_REVISION,
         "runner": {"os": platform.platform(), "cpu_count": os.cpu_count(),
                    "cpu_model": next((line.split(':', 1)[1].strip() for line in
                                       Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), None),
@@ -544,6 +546,7 @@ def main():
                    "image_version": os.environ.get("ImageVersion"), "python": platform.python_version()},
         "configuration": {"cpu_threads": THREADS, "context_tokens": CONTEXT_TOKENS,
                           "completion_tokens": OUTPUT_TOKENS, "seed": SEED, "temperature": 0,
+                          "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
                           "top_k": 1, "top_p": 1, "min_p": 0, "repeat_penalty": 1,
                           "cache_prompt": False, "grammar": None, "chat_template": "GGUF-native Jinja",
                           "reasoning": "off", "reasoning_format": "none", "reasoning_budget": 0,

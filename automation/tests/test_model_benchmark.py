@@ -6,14 +6,16 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import signal
 import time
 
 import pytest
 
 from automation.benchmarks import model_benchmark as runtime
-from automation.benchmarks.scenarios import SCENARIOS, messages
+from automation.benchmarks.scenarios import SCENARIOS, SYSTEM_PROMPT, messages
 from automation.benchmarks.scoring import Inference, MAX_RESPONSE_BYTES, aggregate, score
+from automation.test_agent.contracts import ContractError, ModelProposal
 
 
 CONTENTS = {
@@ -115,6 +117,68 @@ def test_raw_json_is_strict_and_never_repaired(raw):
     assert not case["gates"]["raw_json_valid"] and not case["gates"]["contract_valid"]
 
 
+@pytest.fixture(params=["nested-edits", "nested-edits-only", "union-target"])
+def malformed_shape(request):
+    proposal = perfect(SCENARIOS[0])
+    if request.param == "union-target":
+        proposal["decisions"][0]["target"] = "frontend|backend"
+        rejection = "target: unsupported value"
+    else:
+        proposal["decisions"][0]["edits"] = proposal.pop("edits")
+        if request.param == "nested-edits":
+            proposal["edits"] = []
+            rejection = "decision: expected exactly"
+        else:
+            rejection = "proposal: expected exactly"
+    return json.dumps(proposal), rejection
+
+
+def test_hosted_failure_shapes_remain_rejected_by_real_t02(malformed_shape):
+    raw, rejection = malformed_shape
+    with pytest.raises(ContractError, match=rejection):
+        ModelProposal.from_payload(raw)
+    case = score(SCENARIOS[0], Inference(raw))
+    assert case["raw_response"] == raw and case["gates"]["raw_json_valid"]
+    assert not case["gates"]["contract_valid"] and not case["gates"]["policy_accepted"]
+    assert case["contract_rejection_reason"].startswith(rejection)
+
+
+def test_common_prompt_has_unambiguous_enums_nesting_and_decision_cardinality():
+    assert '"target":"frontend|backend"' not in SYSTEM_PROMPT
+    # Covers spaces/newlines around the colon and unions in every enum field.
+    assert not re.search(r'"(?:target|action|operation)"\s*:\s*"[^"\n]*\|[^"\n]*"', SYSTEM_PROMPT)
+    assert 'target must be exactly one of:\n- "frontend"\n- "backend"' in SYSTEM_PROMPT
+    assert 'action must be exactly one of:\n- "generate"\n- "update"\n- "no-tests-needed"\n- "unsupported"' in SYSTEM_PROMPT
+    assert 'operation must be exactly one of:\n- "create"\n- "update"' in SYSTEM_PROMPT
+    assert '"edits" is a TOP-LEVEL sibling of "decisions"' in SYSTEM_PROMPT
+    assert 'NEVER place "edits" inside a decision' in SYSTEM_PROMPT
+    assert 'NEVER output literal "frontend|backend"' in SYSTEM_PROMPT
+    assert 'exactly one decision for each target represented by the changed files' in SYSTEM_PROMPT
+    assert 'Do not invent a decision for a target absent from the changed files' in SYSTEM_PROMPT
+    assert 'Mixed frontend/backend context requires two distinct decision objects' in SYSTEM_PROMPT
+
+
+def test_prompt_shape_example_is_valid_and_contains_no_scenario_answer():
+    start = SYSTEM_PROMPT.index('\n{\n') + 1
+    example, end = json.JSONDecoder().raw_decode(SYSTEM_PROMPT[start:])
+    assert SYSTEM_PROMPT[start + end:].startswith('\nEnd SHAPE example.')
+    assert 'nesting only; dummy values, not a suggested decision' in SYSTEM_PROMPT[:start]
+    assert set(example) == {"schema_version", "source", "decisions", "edits"}
+    assert example["edits"] == [] and len(example["decisions"]) == 1
+    assert set(example["decisions"][0]) == {"target", "action", "plan"}
+    ModelProposal.from_payload(json.dumps(example))
+    shape_text = SYSTEM_PROMPT[start:start + end]
+    for scenario in SCENARIOS:
+        paths = {p for p, _, _ in scenario.sources} | {p for p, _ in scenario.existing_tests}
+        paths |= set(scenario.candidates)
+        paths |= {e.path for e in scenario.expected if e.path}
+        paths |= {e.evidence_path for e in scenario.expected if e.evidence_path}
+        assert all(path not in SYSTEM_PROMPT for path in paths)
+        assert all(e.behavior not in shape_text for e in scenario.expected)
+        assert example["source"] != asdict(scenario.source)
+        assert scenario.source.repository not in shape_text and scenario.source.run_id not in shape_text
+
+
 @pytest.mark.parametrize("location", ["top", "source", "decision", "plan", "edit"])
 def test_forbidden_trusted_fields_rejected_at_every_level(location):
     proposal = perfect(SCENARIOS[0])
@@ -211,7 +275,7 @@ def test_oversized_response_is_bounded_and_cannot_pass(raw):
 
 def test_aggregation_preserves_cases_is_deterministic_and_selects_no_winner():
     cases = [scored(s, perfect(s)) for s in SCENARIOS]
-    cases[0] = score(SCENARIOS[0], Inference(failure="inference-timeout", wall_seconds=90))
+    cases[0] = score(SCENARIOS[0], Inference(failure="inference-timeout", wall_seconds=runtime.INFERENCE_SECONDS))
     result = aggregate(cases)
     assert result == aggregate(list(reversed(cases)))
     assert result["cases"] == 5 and result["maximum_score"] == 50
@@ -237,7 +301,7 @@ class FakeProvider:
     def infer(self, scenario, metadata):
         self.calls.append(scenario.id)
         if self.fail_infer:
-            return Inference(failure="inference-timeout", wall_seconds=90)
+            return Inference(failure="inference-timeout", wall_seconds=runtime.INFERENCE_SECONDS)
         return Inference(json.dumps(perfect(scenario)), wall_seconds=1, completion_tokens=100, tokens_per_second=100)
 
     def close(self):
@@ -328,8 +392,33 @@ def test_candidate_and_model_cannot_override_host_limits(tmp_path):
     assert runtime.INFERENCE_SECONDS == 90 and runtime.THREADS == 4
 
 
+@pytest.mark.parametrize('field,value', [
+    ('benchmark_revision', 'model-controlled-revision'),
+    ('configuration', {'completion_tokens': 999999, 'inference_seconds': 999999}),
+    ('system_prompt_sha256', '0' * 64),
+])
+def test_model_cannot_supply_benchmark_metadata(field, value):
+    proposal = perfect(SCENARIOS[0])
+    proposal[field] = value
+    with pytest.raises(ContractError, match='proposal: expected exactly'):
+        ModelProposal.from_payload(json.dumps(proposal))
+    assert not scored(SCENARIOS[0], proposal)['gates']['contract_valid']
+
+
 def test_exact_candidate_set_pins_and_equivalent_configuration():
-    assert [c.id for c in runtime.CANDIDATES] == ['qwen3-4b-q4km', 'qwen3-8b-q4km', 'qwen25-coder-7b-q4km']
+    assert runtime.CANDIDATES == (
+        runtime.Candidate('qwen3-4b-q4km', 'Qwen/Qwen3-4B-GGUF', 'bc640142c66e1fdd12af0bd68f40445458f3869b',
+                          'Qwen3-4B-Q4_K_M.gguf', 2497280256,
+                          '7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5'),
+        runtime.Candidate('qwen3-8b-q4km', 'Qwen/Qwen3-8B-GGUF', '7c41481f57cb95916b40956ab2f0b139b296d974',
+                          'Qwen3-8B-Q4_K_M.gguf', 5027783488,
+                          'd98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785'),
+        runtime.Candidate('qwen25-coder-7b-q4km', 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF',
+                          '13fb94bfda8c8cf22497dc57b78f391a9acb426a', 'qwen2.5-coder-7b-instruct-q4_k_m.gguf',
+                          4683073536, '509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c'),
+    )
+    assert runtime.LLAMA_TAG == 'v0.6.0' and runtime.LLAMA_COMMIT == 'd81235049384534c167caea52b85a694f6103d14'
+    assert runtime.THREADS == 4 and runtime.CONTEXT_TOKENS == 8192 and runtime.SEED == 42
     for candidate in runtime.CANDIDATES:
         assert candidate.quantization == 'Q4_K_M'
         assert len(candidate.revision) == 40 and len(candidate.sha256) == 64
@@ -338,9 +427,22 @@ def test_exact_candidate_set_pins_and_equivalent_configuration():
         assert args[args.index('--n-gpu-layers') + 1] == '0'
         assert args[args.index('--reasoning') + 1] == 'off'
         assert '--offline' in args and '--tools' not in args
+        assert not any(a.startswith(('--grammar', '--json-schema')) for a in args)
     prompts = [messages(s) for s in SCENARIOS]
     assert len({p[0]['content'] for p in prompts}) == 1
     assert all('expected' not in p[1]['content'] for p in prompts)
+
+
+def test_r2_preserves_complete_scenarios_expectations_and_scoring():
+    # Golden snapshots from Run 1 source 2d7144827b3401a6ed92b722f80ce0baee3eb45e.
+    snapshot = json.dumps([asdict(s) for s in SCENARIOS], sort_keys=True, separators=(',', ':')).encode()
+    assert hashlib.sha256(snapshot).hexdigest() == 'd7a2395d659f19c7c21fc0df56988781c999306d6a5ab4a4398eeaa0e1400b53'
+    scoring_source = Path('automation/benchmarks/scoring.py').read_bytes()
+    assert hashlib.sha256(scoring_source).hexdigest() == '563c29cc12c470eefb6ea90ba5dfd8b945a58018380fd4635be3435e01d82e27'
+    assert len(SCENARIOS) == 5
+    cases = [scored(s, perfect(s)) for s in SCENARIOS]
+    assert all(case['maximum_score'] == 10 for case in cases)
+    assert aggregate(cases)['maximum_score'] == 50
 
 
 def test_subprocess_environment_has_no_keys_tools_or_proxies(tmp_path, monkeypatch):
@@ -375,6 +477,23 @@ def test_total_budget_is_enforced():
     with pytest.raises(runtime.BenchmarkFailure, match='time-budget-exhausted'):
         runtime.remaining(time.monotonic() - 1, 999)
     assert runtime.remaining(time.monotonic() + 100, 5) <= 5
+
+
+def test_r2_section9_fallback_fits_all_phase_bounds_and_workflow():
+    assert runtime.OUTPUT_TOKENS == 512 and runtime.INFERENCE_SECONDS == 90
+    assert runtime.SETUP_SECONDS == 420 and runtime.ACQUISITION_SECONDS == 180 and runtime.STARTUP_SECONDS == 90
+    workflow = Path('.github/workflows/model-benchmark.yml').read_text()
+    workflow_seconds = int(re.search(r'timeout-minutes: (\d+)', workflow).group(1)) * 60
+    assert workflow_seconds == 2700
+    assert len(runtime.CANDIDATES) * len(SCENARIOS) * 120 == 1800
+    requested = runtime.SETUP_SECONDS + len(runtime.CANDIDATES) * (
+        runtime.ACQUISITION_SECONDS + runtime.STARTUP_SECONDS + len(SCENARIOS) * 120)
+    assert requested == 3030 and requested > workflow_seconds
+    phases = runtime.SETUP_SECONDS + len(runtime.CANDIDATES) * (
+        runtime.ACQUISITION_SECONDS + runtime.STARTUP_SECONDS + len(SCENARIOS) * runtime.INFERENCE_SECONDS)
+    assert phases == 2580 and runtime.TOTAL_SECONDS == 2640
+    assert runtime.TOTAL_SECONDS - phases == 60 and workflow_seconds - runtime.TOTAL_SECONDS == 60
+    assert runtime.OUTPUT_TOKENS / 8.5 < runtime.INFERENCE_SECONDS - 29  # Reported Run 1 rate, not measured here.
 
 
 def test_evidence_truncation_preserves_scores(tmp_path, monkeypatch):
@@ -556,9 +675,12 @@ def test_local_inference_token_bound_prevents_completion_and_reports_timeout(mon
     assert result.failure == 'inference-timeout' and result.wall_seconds >= 0
 
 
-def test_nonthinking_template_then_completion_captures_raw_without_repair(monkeypatch):
-    provider = object.__new__(runtime.LocalInference)
-    provider.deadline = time.monotonic() + 10
+@pytest.mark.parametrize('candidate', runtime.CANDIDATES, ids=lambda c: c.id)
+def test_nonthinking_template_then_completion_captures_raw_without_repair(tmp_path, monkeypatch, candidate):
+    argv = []
+    monkeypatch.setattr(runtime, 'Process', lambda args, root: argv.append(args))
+    provider = runtime.LocalInference(Path('/fixed/llama-server'), tmp_path / candidate.filename,
+                                      tmp_path, time.monotonic() + 10, {})
     calls = []
     def local(endpoint, payload, deadline):
         calls.append((endpoint, payload))
@@ -573,6 +695,13 @@ def test_nonthinking_template_then_completion_captures_raw_without_repair(monkey
     result = provider.infer(SCENARIOS[0], metadata)
     assert result.raw == '<think>unexpected reasoning</think>{}'
     assert result.prompt_tokens == 3 and result.completion_tokens == 5 and result.tokens_per_second == 2.5
+    assert len(argv) == 1 and argv[0][argv[0].index('--predict') + 1] == str(runtime.OUTPUT_TOKENS)
+    assert calls[0] == ('/apply-template', {'messages': messages(SCENARIOS[0])})
+    assert calls[0][1]['messages'][0] == {'role': 'system', 'content': SYSTEM_PROMPT}
+    assert set(calls[-1][1]) == {'prompt', 'n_predict', 'temperature', 'top_k', 'top_p', 'min_p',
+                               'seed', 'repeat_penalty', 'cache_prompt', 'stream'}
+    assert {k: calls[-1][1][k] for k in ('temperature', 'top_k', 'top_p', 'min_p', 'repeat_penalty')} == {
+        'temperature': 0.0, 'top_k': 1, 'top_p': 1.0, 'min_p': 0.0, 'repeat_penalty': 1.0}
     assert calls[-1][1]['n_predict'] == runtime.OUTPUT_TOKENS and calls[-1][1]['seed'] == runtime.SEED
     assert calls[-1][1]['cache_prompt'] is False
     assert not score(SCENARIOS[0], result)['gates']['raw_json_valid']
@@ -626,4 +755,11 @@ def test_complete_host_orchestration_with_fake_setup_and_inference(tmp_path, mon
     assert all(len(c['scenarios']) == 5 for c in result['candidates'])
     assert all(c['aggregate']['score'] == (0 if setup_failed else 50) for c in result['candidates'])
     assert result['setup_failure'] == ('fake-setup-failure' if setup_failed else None)
+    assert result['benchmark_revision'] == 'P01-R2'
+    configuration = result['configuration']
+    assert configuration['completion_tokens'] == runtime.OUTPUT_TOKENS
+    assert configuration['inference_seconds'] == runtime.INFERENCE_SECONDS
+    assert configuration['system_prompt_sha256'] == hashlib.sha256(SYSTEM_PROMPT.encode('utf-8')).hexdigest()
+    assert configuration['grammar'] is None
+    assert all(m[0] == {'role': 'system', 'content': SYSTEM_PROMPT} for m in result['effective_messages'].values())
     assert set(p.name for p in tmp_path.iterdir()) == {'p01-evidence'}

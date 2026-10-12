@@ -10,6 +10,18 @@ Commit, push, PR changes, remote uploads and hosted benchmark execution require
 the later explicitly approved P01-B phase. Running the real harness locally
 fails before downloads: it requires GitHub's standard Ubuntu 24.04 hosted image.
 
+## P01 hosted run history
+
+Run 1 used commit `2d7144827b3401a6ed92b722f80ce0baee3eb45e`. The reported
+hosted evidence exposed prompt-shape ambiguity and sensitivity to the 90-second
+CPU inference timeout. Candidate failures caused a nonzero benchmark exit; no
+production winner was selected. Original hosted evidence is not replaced here.
+
+P01-R2 changes only the common schema presentation and output/time budget,
+with host-owned revision/configuration metadata and regression tests. Its single
+final hosted candidate comparison is **NOT RUN**. This phase prepares local
+review evidence only: no commit, push, workflow trigger or T04 implementation.
+
 ## Workflow and cost
 
 `.github/workflows/model-benchmark.yml` runs on pushes to `test-agent-workflow`
@@ -60,7 +72,7 @@ It receives no tools, URLs to fetch, MCP configuration or ambient environment.
 
 All candidates use the identical messages and examples, native GGUF Jinja chat
 templates, CPU threads 4 (including batch), context 8,192, maximum completion
-1,536, seed 42, temperature 0, top-k 1, top-p 1, min-p 0 and repeat penalty 1.
+512, seed 42, temperature 0, top-k 1, top-p 1, min-p 0 and repeat penalty 1.
 Prompt cache reuse and context shifting are disabled. Qwen3 is consistently
 non-thinking via llama.cpp `--reasoning off`/budget 0 (sets the template's
 `enable_thinking=false`), plus the common `/no_think` system instruction.
@@ -71,6 +83,14 @@ fence or prose stripping. No JSON grammar hides structured-output failures.
 Messages, inference settings, rendered-prompt digest/suffix and prompt token
 counts are evidence. Template formatting can differ across GGUFs; task text does
 not. No candidate-specific prompt tuning occurs.
+
+The common system message lists allowed enum values in prose, followed by one
+parseable shape example with dummy source values and no scenario paths or behavior.
+It explicitly places `edits` beside `decisions` at the top level, forbids nested
+edits and union literals, and requires exactly one decision per changed target
+(two distinct decisions for mixed frontend/backend context). The example is only
+a nesting guide; source identity and decisions must come from the supplied context.
+Raw output still goes directly to T02 parsing without repair or normalization.
 
 ## Scenarios and scoring
 
@@ -113,7 +133,7 @@ responses permit human assessment; no LLM judge or automatic winner is used.
 
 | Resource | Bound |
 | --- | --- |
-| Full harness / workflow | 2,580 seconds / 45 minutes |
+| Full harness / workflow | 2,640 seconds / 45 minutes |
 | llama.cpp acquisition and build combined | 420 seconds (fetch 90; configure 30; build 300; shared deadline) |
 | Model acquisition / startup including warmup | 180 / 90 seconds per candidate |
 | Inference including formatting/tokenization | 90 seconds per scenario |
@@ -124,6 +144,29 @@ responses permit human assessment; no LLM judge or automatic winner is used.
 | Build preflight | At least 4 GiB free (2 GiB build allowance plus reserve) |
 | Process address space / core dumps | 12 GiB inherited limit / disabled |
 | Uploaded evidence | At most 1 MiB combined, one-day retention |
+
+R2 uses the section 9 output-reduction fallback to preserve the 45-minute workflow.
+The initially requested 768-token / 120-second pair cannot fit the unchanged phase
+bounds: `3 candidates × 5 scenarios × 120 seconds = 1,800 seconds` of inference,
+plus `420 + 3 × (180 + 90) = 1,230 seconds` of setup/acquisition/startup, totals
+`3,030 seconds` (50 minutes 30 seconds), before checkout, scoring, cleanup and
+evidence upload. Keeping the old global deadline would truncate that worst case.
+
+The final common output limit is reduced from 1,536 to **512 tokens**; the per-case
+timeout stays **90 seconds** under this fallback. At Run 1's reported approximately
+8.5 generation tokens/s, `512 / 8.5 ≈ 60.24 seconds` leaves approximately 29.76
+seconds of the request window for template rendering, tokenization and prompt
+processing. This is arithmetic from reported Run 1 throughput, not an R2 measurement
+or guarantee that every answer fits the token budget.
+
+The final configured phase maximum is `420 + 3 × (180 + 90 + 5 × 90) = 2,580 seconds`
+(43 minutes), allowing all 15 cases to consume their full timeouts without relying
+on early candidate failure. `TOTAL_SECONDS` increases from 2,580 to **2,640 seconds**
+(44 minutes), reserving 60 seconds for source-SHA lookup, supervision, scoring,
+cleanup and evidence writing, plus another `2,700 - 2,640 = 60 seconds` for workflow
+checkout, validation and upload. The 45-minute workflow and all setup/acquisition/
+startup bounds remain unchanged. Overhead allowances require hosted validation;
+no R2 runtime has been measured locally.
 
 Candidates run sequentially. After failure or completion, terminate the entire
 server session group, remove all candidate data before the next acquisition and
@@ -141,6 +184,12 @@ CPU/memory/image/Python and disk free before model, after load and after cleanup
 VmHWM sampling runs every 50 ms; very short-lived peaks may be missed. Missing
 measurements are null, never fabricated. This is one run per case with no warmup
 inference beyond llama.cpp startup; CPU variability and sample size limit conclusions.
+
+Machine-readable results identify this harness as `benchmark_revision: P01-R2`.
+The host records the effective output-token limit (`configuration.completion_tokens`),
+per-case timeout (`configuration.inference_seconds`) and SHA-256 of the exact UTF-8
+system message (`configuration.system_prompt_sha256`), including setup-failure
+evidence. Model responses cannot set these fields.
 
 ## Evidence and command safety
 
@@ -171,6 +220,7 @@ backend/.venv/bin/python -m pytest automation/tests/test_model_benchmark.py -q
 Harness tests use synthetic proposals and fake inference, processes and network
 objects. They test scoring failures, real T02 integration, bounding, deadlines,
 cleanup, sequential lifecycle, pinned candidates and lack of model execution.
-No application test runner is invoked on generated code. Actual hosted latency,
+No application test runner is invoked on generated code. R2 hosted latency,
 quality, availability and memory results remain **NOT RUN** until the reviewed
-harness is explicitly approved, committed and pushed and its workflow completes.
+correction is approved, committed and separately approved for push and its
+workflow completes. Run 1 history above does not establish R2 results.
