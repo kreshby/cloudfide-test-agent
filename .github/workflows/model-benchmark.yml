@@ -1,0 +1,45 @@
+name: P01 Local CPU Model Benchmark
+
+on:
+  push:
+    branches: [test-agent-workflow]
+    paths:
+      - .github/workflows/model-benchmark.yml
+      - automation/benchmarks/**
+      - automation/tests/test_model_benchmark.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-model-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    # Standard hosted minutes are free for public repositories; fail closed if made private.
+    if: ${{ github.repository == 'kreshby/cloudfide-test-agent' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out approved benchmark source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run sequential CPU benchmark
+        run: python3 -m automation.benchmarks.model_benchmark
+      - name: Validate named evidence and total one MiB budget
+        id: evidence
+        if: ${{ always() }}
+        run: python3 -m automation.benchmarks.model_benchmark --check-evidence "$RUNNER_TEMP/p01-evidence"
+      - name: Upload bounded selection evidence
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: p01-model-benchmark-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/p01-evidence/benchmark-results.json
+            ${{ runner.temp }}/p01-evidence/benchmark-summary.md
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
