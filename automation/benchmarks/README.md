@@ -1,36 +1,76 @@
 # P01 — $0 local model selection benchmark
 
-This is experimental selection evidence for the future UnitTestAgent. T04 has
-not started. No production provider is selected, and model-generated tests are
-neither written to application paths nor executed or verified. Human review of
-quality and resource evidence is required before choosing a runtime.
+This is experimental selection evidence for the future UnitTestAgent. P01 model
+selection is complete. T04 has not started.
+Model-generated tests were neither written to application paths nor executed or
+verified. The production workflow is **NOT YET IMPLEMENTED** and **NOT YET VERIFIED**.
+Running the real harness locally fails before downloads: it requires GitHub's
+standard Ubuntu 24.04 hosted image.
 
-P01-A permits local implementation and deterministic fake-response tests only.
-Commit, push, PR changes, remote uploads and hosted benchmark execution require
-the later explicitly approved P01-B phase. Running the real harness locally
-fails before downloads: it requires GitHub's standard Ubuntu 24.04 hosted image.
+## P01 decision
 
-## P01 hosted run history
+Two real GitHub-hosted runs supplied the selection evidence. Both workflows
+completed with a failure conclusion; evidence validation and upload succeeded.
+The measurements below summarize the reported hosted evidence, without replacing
+the original artifacts or copying raw model responses. `n/a` means unavailable
+in the supplied summary, never zero.
 
-Run 1 used commit `2d7144827b3401a6ed92b722f80ce0baee3eb45e`. The reported
-hosted evidence exposed prompt-shape ambiguity and sensitivity to the 90-second
-CPU inference timeout. Candidate failures caused a nonzero benchmark exit; no
-production winner was selected. Original hosted evidence is not replaced here.
+Run 1: [Actions run 38317258513](https://github.com/kreshby/cloudfide-test-agent/actions/runs/38317258513),
+commit `2d7144827b3401a6ed92b722f80ce0baee3eb45e`.
 
-P01-R2 changes only the common schema presentation and output/time budget,
-with host-owned revision/configuration metadata and regression tests. Its single
-final hosted candidate comparison is **NOT RUN**. This phase prepares local
-review evidence only: no commit, push, workflow trigger or T04 implementation.
+| Candidate | Outcome | Quality | JSON / contract / policy | Median / total inference (s) | Generation (tok/s) | Peak RSS (bytes) |
+| --- | --- | --- | --- | --- | --- | --- |
+| qwen3-4b-q4km | completed | 5/50 | 0% / 0% / 0% | 40.44 / 202.46 | 14.26 | 6,293,258,240 |
+| qwen3-8b-q4km | inference-timeout | 0/50 | n/a | n/a | n/a | 9,745,895,424 |
+| qwen25-coder-7b-q4km | inference-timeout | 30/50 | 80% / 60% / 60% | 78.88 / 353.18 | 8.91 | 8,701,718,528 |
+
+Qwen3-8B's first case timed out at approximately 90.09 seconds. Qwen2.5-Coder
+scored 10/10 on already-covered, 9/10 on backend-update and 8/10 on
+backend-generate; mixed-stack timed out. Run 1 also exposed prompt-shape ambiguity
+and sensitivity to the 90-second CPU inference timeout.
+
+Final corrective run: [Actions run 38320645069](https://github.com/kreshby/cloudfide-test-agent/actions/runs/38320645069),
+commit `b6ee69ea568e449fce2fb12aabb8ecc688967181`, revision **P01-R2**.
+All candidates used 512 completion tokens and 90 seconds per scenario.
+
+| Candidate | Outcome | Quality | Timed-out inference (s) | Peak RSS (bytes) |
+| --- | --- | --- | --- | --- |
+| qwen3-4b-q4km | inference-timeout | 0/50 | ~90.09 | 5,615,484,928 |
+| qwen3-8b-q4km | inference-timeout | 0/50 | ~90.09 | 9,746,051,072 |
+| qwen25-coder-7b-q4km | inference-timeout | 0/50 | ~90.09 | 8,498,057,216 |
+
+No candidate passed R2. The monolithic P01 benchmark prompt/request shape is too
+slow under the selected 512-token / 90-second CPU bound.
+
+**Selected T04 runtime candidate: `qwen25-coder-7b-q4km`,
+Qwen2.5-Coder-7B-Instruct-GGUF, Q4_K_M.** This is a documented engineering
+selection based on Run 1 evidence, not a claim that R2 passed:
+
+- It produced by far the strongest actual task-quality evidence and was the only
+  candidate to demonstrate meaningful valid structured output.
+- It recognized already-covered behavior as no-tests-needed and produced strong
+  backend update/generate decisions.
+- Its observed approximately 8.7 GB peak memory fits the 16 GB hosted runner.
+- Qwen3-4B was faster/lighter but materially weaker in structured/task quality;
+  Qwen3-8B was slower/heavier and produced no useful scored evidence.
+
+P01 selects the model/runtime candidate, not the final production prompt shape.
+T04 must use compact/staged inference rather than copying the monolithic P01
+benchmark interaction. Production workflow remains **NOT YET IMPLEMENTED** and
+**NOT YET VERIFIED**. No paid API/provider is selected. The candidate is documented
+here only; benchmark runtime selection and all three candidate pins are unchanged.
+P01 is complete. T04 is not started, and no third hosted
+benchmark run is requested.
 
 ## Workflow and cost
 
-`.github/workflows/model-benchmark.yml` runs on pushes to `test-agent-workflow`
-only when its own file, this benchmark package or its harness test file changes.
-This supports the first approved branch push before default-branch installation.
-There is no dispatch dependency, PR trigger, schedule, matrix or cache. Ordinary
-CI is unchanged and does not invoke a model. The benchmark uses the runner's
-Python, Git, CMake and compiler, with no package installation or application
-dependency changes.
+`.github/workflows/model-benchmark.yml` is manual-only via `workflow_dispatch`,
+with no inputs, push trigger, PR trigger, schedule, matrix or cache. P01 selection
+is complete; future T04 development pushes must not automatically spend runner
+time repeating model selection. The benchmark remains reproducible manually
+after this workflow exists on the default branch. Ordinary CI is unchanged and
+does not invoke a model. The benchmark uses the runner's Python, Git, CMake and
+compiler, with no package installation or application dependency changes.
 
 The job requires the public `kreshby/cloudfide-test-agent` repository and
 `ubuntu-24.04`, with `contents: read`, checkout credentials disabled and a
@@ -165,8 +205,9 @@ on early candidate failure. `TOTAL_SECONDS` increases from 2,580 to **2,640 seco
 (44 minutes), reserving 60 seconds for source-SHA lookup, supervision, scoring,
 cleanup and evidence writing, plus another `2,700 - 2,640 = 60 seconds` for workflow
 checkout, validation and upload. The 45-minute workflow and all setup/acquisition/
-startup bounds remain unchanged. Overhead allowances require hosted validation;
-no R2 runtime has been measured locally.
+startup bounds remain unchanged. Phase arithmetic does not guarantee a completed
+answer: the hosted R2 request timeouts are recorded above. No real model has been
+run locally for this closeout.
 
 Candidates run sequentially. After failure or completion, terminate the entire
 server session group, remove all candidate data before the next acquisition and
@@ -220,7 +261,7 @@ backend/.venv/bin/python -m pytest automation/tests/test_model_benchmark.py -q
 Harness tests use synthetic proposals and fake inference, processes and network
 objects. They test scoring failures, real T02 integration, bounding, deadlines,
 cleanup, sequential lifecycle, pinned candidates and lack of model execution.
-No application test runner is invoked on generated code. R2 hosted latency,
-quality, availability and memory results remain **NOT RUN** until the reviewed
-correction is approved, committed and separately approved for push and its
-workflow completes. Run 1 history above does not establish R2 results.
+No application test runner is invoked on generated code. The two hosted runs and
+their limitations are recorded in the P01 decision above. Deterministic harness
+tests do not establish production test quality, latency or verification; the
+selected candidate still requires T04 implementation with compact/staged inference.

@@ -554,12 +554,18 @@ def test_process_caps_capture_and_terminates_session(tmp_path, monkeypatch):
     assert signals == [(FakeProcess.pid, signal.SIGTERM), (FakeProcess.pid, signal.SIGKILL)]
 
 
-def test_workflow_is_narrow_read_only_cpu_and_ci_is_separate():
+def test_workflow_is_manual_only_read_only_cpu_and_ci_is_separate():
     text = Path('.github/workflows/model-benchmark.yml').read_text()
+    triggers = re.search(r'^on:\n(.*?)(?=^\S)', text, flags=re.M | re.S).group(1)
+    assert triggers.strip() == 'workflow_dispatch:'  # No inputs or additional events.
+    assert 'workflow_dispatch:' in text and 'push:' not in text
     assert 'runs-on: ubuntu-24.04' in text and 'timeout-minutes: 45' in text
     assert 'persist-credentials: false' in text and 'contents: read' in text and 'retention-days: 1' in text
     assert 'pull_request:' not in text and 'schedule:' not in text
-    assert 'automation/benchmarks/**' in text and 'branches: [test-agent-workflow]' in text
+    assert re.findall(r'^\s+uses:\s*(\S+)', text, flags=re.M) == [
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+        'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
+    ]
     assert 'github.event.repository.private' in text and 'cache@' not in text and 'matrix:' not in text
     assert 'p01-evidence/benchmark-results.json' in text and 'p01-evidence/benchmark-summary.md' in text
     assert 'automation.benchmarks' not in Path('.github/workflows/ci.yml').read_text()

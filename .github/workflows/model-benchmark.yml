@@ -1,12 +1,7 @@
 name: P01 Local CPU Model Benchmark
 
 on:
-  push:
-    branches: [test-agent-workflow]
-    paths:
-      - .github/workflows/model-benchmark.yml
-      - automation/benchmarks/**
-      - automation/tests/test_model_benchmark.py
+  workflow_dispatch:
 
 permissions:
   contents: read
