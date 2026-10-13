@@ -21,7 +21,7 @@ from .handoff import (FILE_NAME, MAX_HANDOFF_BYTES, decode, encode, execution_fa
                       report, successful, terminal_facts)
 from .provider import digest, strict_json
 from .publisher import (GitHubPublisherAdapter, GitHubPublisherHTTPTransport, PublicationState,
-                        PublisherAuthor, publish)
+                        PublicationError, PublisherAuthor, publish)
 from .reporting import AgentRun, PublicationIdentity, bind_evidence
 from .runtime import LocalRuntime, Process, RuntimeUnavailable
 from .verification import Executor, GIT, Verifier, checked, safe_read
@@ -331,7 +331,7 @@ def _output(**values):
             output.write(f"{key}={value}\n")
 
 
-def main(operation):
+def _main(operation):
     if operation not in {"prepare", "publish"}:
         raise WorkflowError("unsupported host operation")
     if not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
@@ -387,18 +387,44 @@ def main(operation):
         raise WorkflowError("publisher source is not applicable")
     if pre.identity.pr_number != run_id(os.environ["EXPECTED_PR_NUMBER"]):
         raise WorkflowError("publisher concurrency target mismatch")
-    directory = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True) / "t07-handoff"
-    if set(p.name for p in directory.iterdir()) != {FILE_NAME}:
-        raise WorkflowError("handoff file allowlist rejected")
-    raw, _ = safe_read(directory, FILE_NAME, maximum=MAX_HANDOFF_BYTES)
-    value = decode(raw, os.environ["HANDOFF_SHA256"], expected_identity=pre.identity,
-                   expected_source_ci=pre.source_ci, expected_trusted_sha=trusted_sha)
-    artifact_id = os.environ.get("FINAL_ARTIFACT_ID", "")
-    prepared = report(value, artifact_id=run_id(artifact_id) if artifact_id else None)
+    try:
+        directory = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True) / "t07-handoff"
+        if set(p.name for p in directory.iterdir()) != {FILE_NAME}:
+            raise WorkflowError("handoff file allowlist rejected")
+        raw, _ = safe_read(directory, FILE_NAME, maximum=MAX_HANDOFF_BYTES)
+        value = decode(raw, os.environ["HANDOFF_SHA256"], expected_identity=pre.identity,
+                       expected_source_ci=pre.source_ci, expected_trusted_sha=trusted_sha)
+    except Exception:
+        raise WorkflowError("publisher-handoff-unavailable") from None
+    try:
+        artifact_id = os.environ.get("FINAL_ARTIFACT_ID", "")
+        prepared = report(value, artifact_id=run_id(artifact_id) if artifact_id else None)
+    except Exception:
+        raise WorkflowError("publisher-report-unavailable") from None
     adapter = GitHubPublisherAdapter(REPOSITORY, GitHubPublisherHTTPTransport(REPOSITORY, os.environ.get("GITHUB_TOKEN")))
     outcome = publish(prepared, adapter, EXPECTED_AUTHOR)
+    print("publisher-" + outcome.state.value)
     # A successful comment write cannot make a failed/unresolved pipeline green.
     return int(outcome.state == PublicationState.STALE or not successful(prepared))
+
+
+PUBLISHER_FAILURES = frozenset({"publisher-preflight-unavailable", "publisher-handoff-unavailable",
+                               "publisher-report-unavailable", "publisher-read-unavailable",
+                               "publisher-write-unavailable"})
+
+
+def main(operation):
+    try:
+        return _main(operation)
+    except Exception as error:
+        if operation != "publish":
+            raise
+        # Print only host-owned phase categories at the CLI boundary. Never
+        # expose response bodies, arbitrary exception text, tokens, or paths.
+        category = (error.phase if type(error) is PublicationError else
+                    str(error) if type(error) is WorkflowError else None)
+        raise WorkflowError(category if category in PUBLISHER_FAILURES else
+                            "publisher-preflight-unavailable") from None
 
 
 if __name__ == "__main__":
@@ -413,8 +439,10 @@ if __name__ == "__main__":
         if len(sys.argv) != 2:
             raise WorkflowError("one fixed operation required")
         code = main(sys.argv[1])
-    except Exception:
-        print("Trusted test-agent integration unavailable.", file=sys.stderr)
+    except Exception as error:
+        category = str(error) if type(error) is WorkflowError else None
+        print(category if category in PUBLISHER_FAILURES else
+              "Trusted test-agent integration unavailable.", file=sys.stderr)
         code = 1
     finally:
         signal.alarm(0)

@@ -105,6 +105,12 @@ def _target_path(path, target):
 
 def _evidence(item, maximum):
     value = asdict(item)
+    # The array supplies the category and the projection supplies the trust
+    # label. Broad relationship paths repeat every changed file for every test;
+    # their kinds suffice here. Exact paths remain in the host's T03 bundle.
+    for key in ("category", "trust", "blob_sha"):
+        value.pop(key)
+    value["reasons"] = sorted({reason.split(":", 1)[0] for reason in item.reasons})
     if item.content is not None:
         raw = item.content.encode("utf-8")
         value["content_sha256"] = digest(raw)
@@ -115,10 +121,13 @@ def _evidence(item, maximum):
 
 
 def project_context(bundle: ContextBundle, target: Target, intended=None) -> bytes:
-    """Deterministic stack projection; clipping is explicit, total overflow fails.
+    """Deterministic stack projection with a fixed global test-content budget.
 
     Edits restrict existing tests/candidates to accepted intended paths. Source
-    evidence remains the changed files for that target; no import traversal.
+    content already represented by a complete, unclipped patch is redundant.
+    Other source evidence and all diff metadata must fit before test content is
+    allocated. Only complete tests may authorize coverage claims or updates.
+    No paths are discovered and an oversized mandatory projection fails closed.
     """
     tests = [e for e in bundle.existing_tests if _target_path(e.path, target)
              and (intended is None or e.path in intended)]
@@ -126,17 +135,36 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
     for item in sorted(bundle.changed_files, key=lambda e: e.path):
         if _target_path(item.path, target):
             value = asdict(item)
+            value.pop("trust")
+            value.pop("head_sha")  # Bound by the projection's source identity.
             if item.patch is not None and len(item.patch.encode()) > 2048:
                 value["patch"] = item.patch.encode()[:2048].decode("utf-8", errors="ignore")
                 value["patch_state"] = "projection-clipped"
             changed.append(value)
+    patch_paths = {f["path"] for f in changed if f["patch_state"] == "complete"}
+    represented = {e.path for e in bundle.sources if e.path in patch_paths
+                   and e.source_sha == bundle.source.head_sha and e.state == "available"
+                   and e.content is not None and len(e.content.encode("utf-8")) <= 4096}
+    for file in changed:
+        if file["path"] in represented:
+            file["head_content_state"] = "represented-by-complete-patch"
+    test_evidence = [_evidence(e, 4096) for e in sorted(tests, key=lambda e: e.path)]
+    contents = {}
+    for evidence in test_evidence:
+        if evidence["content"] is not None:
+            contents[evidence["path"]] = (evidence["content"], evidence["state"])
+            evidence["content"] = None
+            evidence["state"] = "projection-clipped"
     value = {
         "source": asdict(bundle.source), "context_sha256": bundle.sha256, "target": target,
+        "trust": "untrusted-repository-data",
         "changed_files": changed,
         "sources": [_evidence(e, 4096) for e in sorted(bundle.sources, key=lambda e: (e.path, e.source_sha))
-                    if _target_path(e.path, target)],
-        "existing_tests": [_evidence(e, 4096) for e in sorted(tests, key=lambda e: e.path)],
-        "candidate_tests": [asdict(e) for e in sorted(bundle.candidate_tests, key=lambda e: e.path)
+                    if _target_path(e.path, target) and not (
+                        e.path in represented and e.source_sha == bundle.source.head_sha)],
+        "existing_tests": test_evidence,
+        "candidate_tests": [{"path": e.path, "exists": e.exists}
+                            for e in sorted(bundle.candidate_tests, key=lambda e: e.path)
                             if _target_path(e.path, target) and (intended is None or e.path in intended)],
         "configuration": [_evidence(e, 2048) for e in sorted(bundle.configuration, key=lambda e: e.path)
                           if _target_path(e.path, target) or (target == Target.BACKEND and e.path == "pytest.ini")],
@@ -144,9 +172,30 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
                      if _target_path(e.path, target)],
         "markers": sorted(bundle.markers),
     }
+    # Exact head is already supplied once in source. Historical evidence keeps
+    # its separate SHA; the complete T03 snapshot remains digest-bound.
+    for group in ("sources", "existing_tests", "configuration", "fixtures"):
+        for evidence in value[group]:
+            if evidence["source_sha"] == bundle.source.head_sha:
+                evidence.pop("source_sha")
     raw = canonical(value)
     if len(raw) > MAX_PROJECTION_BYTES:
         raise AgentError("context projection byte limit")
+    # Directly named/referenced tests precede broad feature/directory matches.
+    # Trial the actual canonical bytes, including escaping and clipping state;
+    # no character-count estimates or model-selected budget are used.
+    direct = {e.path for e in tests if any(r.startswith(("named-module-test", "module-reference",
+                                                        "changed-existing-test")) for r in e.reasons)}
+    for evidence in sorted(test_evidence, key=lambda e: (e["path"] not in direct, e["path"])):
+        original = contents.get(evidence["path"])
+        if original is None:
+            continue
+        evidence["content"], evidence["state"] = original
+        trial = canonical(value)
+        if len(trial) <= MAX_PROJECTION_BYTES:
+            raw = trial
+        else:
+            evidence["content"], evidence["state"] = None, "projection-clipped"
     return raw
 
 

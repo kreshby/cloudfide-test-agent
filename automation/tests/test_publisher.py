@@ -220,6 +220,8 @@ def test_concrete_transport_fixed_host_auth_and_errors_are_offline(monkeypatch, 
             assert 0 < count <= 4096
             data, self.data = self.data[:count], self.data[count:]
             return data
+        def isclosed(self):
+            return not self.data
     remote = Remote()
     class Socket:
         def settimeout(self, timeout):

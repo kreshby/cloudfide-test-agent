@@ -32,6 +32,19 @@ MAX_REMOTE_COMMENT_BYTES = 64 * 1024
 class PublicationError(ValueError):
     """Fixed errors, never token values, remote bodies or transport exceptions."""
 
+    def __init__(self, message, *, phase="publisher-report-unavailable"):
+        super().__init__(message)
+        self.phase = phase
+
+
+def _phase(category, operation, *args):
+    try:
+        return operation(*args)
+    except PublicationError as error:
+        raise PublicationError(str(error), phase=category) from None
+    except Exception:
+        raise PublicationError(category, phase=category) from None
+
 
 def _integer(value):
     try:
@@ -192,6 +205,11 @@ class GitHubPublisherHTTPTransport:
                 raise PublicationError("publisher response byte limit exceeded")
             data = bytearray()
             while True:
+                # HTTPResponse closes its file after the last Content-Length
+                # byte (or terminal chunk). With Connection: close that also
+                # closes the captured socket; do not touch it again at EOF.
+                if response.isclosed():
+                    break
                 sock.settimeout(remaining())
                 chunk = response.read1(min(4096, MAX_RESPONSE_BYTES + 1 - len(data)))
                 if not chunk:
@@ -201,6 +219,8 @@ class GitHubPublisherHTTPTransport:
                     raise PublicationError("publisher response byte limit exceeded")
             link = response.getheader("Link", "")
             remaining()
+            if length is not None and len(data) != int(length):
+                raise PublicationError("publisher response length mismatch")
             if len(data) > MAX_RESPONSE_BYTES or len(link) > 8192:
                 raise PublicationError("publisher response byte limit exceeded")
             return Response(response.status, bytes(data), re.search(r';\s*rel="next"(?:\s*,|\s*$)', link) is not None)
@@ -354,10 +374,10 @@ def publish(report, adapter: GitHubPublisherAdapter, author: PublisherAuthor):
     if adapter.repository != report.identity.repository:
         raise PublicationError("publisher repository mismatch")
     i = report.identity
-    if not _current(adapter.pull_request(i.pr_number), i):
+    if not _current(_phase("publisher-read-unavailable", adapter.pull_request, i.pr_number), i):
         return PublicationResult(PublicationState.STALE)
     matching = []
-    for comment in adapter.comments(i.pr_number):
+    for comment in _phase("publisher-read-unavailable", adapter.comments, i.pr_number):
         if comment.author != author or (MARKER not in comment.body and MARKER_FAMILY + "v1" not in comment.body):
             continue
         try:
@@ -378,10 +398,10 @@ def publish(report, adapter: GitHubPublisherAdapter, author: PublisherAuthor):
                 raise PublicationError("conflicting publication for same run and attempt")
             return PublicationResult(PublicationState.IDEMPOTENT, comment.id)
     # Immediately before the only POST/PATCH: never write after a source change.
-    if not _current(adapter.pull_request(i.pr_number), i):
+    if not _current(_phase("publisher-read-unavailable", adapter.pull_request, i.pr_number), i):
         return PublicationResult(PublicationState.STALE)
-    result = (adapter.update_comment(matching[0][0].id, report.body) if matching
-              else adapter.create_comment(i.pr_number, report.body))
+    result = (_phase("publisher-write-unavailable", adapter.update_comment, matching[0][0].id, report.body) if matching
+              else _phase("publisher-write-unavailable", adapter.create_comment, i.pr_number, report.body))
     if result.author != author or result.body != report.body:
-        raise PublicationError("publisher write receipt mismatch")
+        raise PublicationError("publisher write receipt mismatch", phase="publisher-write-unavailable")
     return PublicationResult(PublicationState.UPDATED if matching else PublicationState.CREATED, result.id)
