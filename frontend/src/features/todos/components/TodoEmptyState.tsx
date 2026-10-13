@@ -17,7 +17,7 @@ export function TodoEmptyState({
       </Heading>
       <Text muted>
         {hasTodos
-          ? 'Change the status filter or search to find your tasks.'
+          ? 'Change the filters or search to find your tasks.'
           : 'Write down what you need to do and get started.'}
       </Text>
       {!hasTodos && (

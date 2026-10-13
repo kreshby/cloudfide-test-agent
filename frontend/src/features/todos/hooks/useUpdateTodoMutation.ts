@@ -14,6 +14,7 @@ export function useUpdateTodoMutation() {
       queryClient.setQueryData<Todo[]>(todoKeys.list, (current) =>
         current?.map((todo) => (todo.id === saved.id ? saved : todo)),
       )
+      await queryClient.invalidateQueries({ queryKey: todoKeys.priorityLists })
     },
   })
 }

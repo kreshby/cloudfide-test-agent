@@ -11,10 +11,11 @@ import { useTodoFilters } from './hooks/useTodoFilters'
 import { useTodosBusy } from './hooks/useTodosBusy'
 import { useTodosQuery } from './hooks/useTodosQuery'
 import { useUpdateTodoMutation } from './hooks/useUpdateTodoMutation'
-import type { Todo } from './types'
+import type { Priority, Todo } from './types'
 
 export function TodosPage() {
-  const todosQuery = useTodosQuery()
+  const [priority, setPriority] = useState<Priority | ''>('')
+  const todosQuery = useTodosQuery(priority || undefined)
   const todos = todosQuery.data ?? []
   const filters = useTodoFilters(todos)
   const toggleTodo = useUpdateTodoMutation()
@@ -56,9 +57,11 @@ export function TodosPage() {
           filter={filters.filter}
           search={filters.search}
           sort={filters.sort}
+          priority={priority}
           onFilterChange={filters.setFilter}
           onSearchChange={filters.setSearch}
           onSortChange={filters.setSort}
+          onPriorityChange={setPriority}
         />
         {error && (
           <Alert variant="warning">
@@ -74,7 +77,9 @@ export function TodosPage() {
         )}
         <TodoList
           todos={filters.visible}
-          hasTodos={todos.length > 0}
+          hasTodos={
+            todos.length > 0 || (Boolean(priority) && !todosQuery.isError)
+          }
           loading={todosQuery.isPending}
           failed={todosQuery.isError}
           busy={busy}
