@@ -1,11 +1,12 @@
-# Trusted test-agent boundaries (T02, T03, and T04)
+# Trusted test-agent boundaries (T02 through T05)
 
 This package uses only the Python standard library. It parses model proposals,
 checks trusted context and test-edit policy, and constructs immutable changes.
 T02 does not write edits, execute commands/tests, load skills, contact providers,
 or publish results. T03 adds bounded GitHub reads and context collection. T04
 adds advisory staged inference, authenticated skills, and a verification handshake.
-It still has no writer, test executor, runtime bootstrap, or production workflow. Run
+T04 itself has no writer, test executor, runtime bootstrap, or production workflow.
+T05 adds a separate trusted Docker verifier described below. Run
 the automation tests from the root:
 
 ```sh
@@ -77,9 +78,9 @@ execution result, collected count, exit code and a report reference with at most
 64 KiB of declared output. A passed record requires exit 0 and collected tests.
 Final statuses are `verified`, `verification-failed`, `baseline-failed`,
 `unavailable`, `stale`, `unsupported`. Declaring `verified` requires passed
-baseline and patched evidence in the host contract. No verifier is run here;
-the future trusted aggregator remains responsible for actual evidence and source
-binding. Model deserialization cannot construct these host contracts.
+baseline and patched evidence in the host contract. T02 performs no execution;
+T05 owns aggregation, actual evidence and source binding. Model deserialization
+cannot construct these host contracts.
 
 ## Host context and allowed edits
 
@@ -448,5 +449,244 @@ skills, state transitions, binding, forbidden tools, malformed/oversized output,
 T02 rejection, budgets, CLI handshake and host verdict authority. HTTP is mocked;
 no generated test, model, network request or application suite runs in these
 tests. Live output reliability/latency, test correctness, compilation and coverage
-are unmeasured. T05 verification and T07 trusted runtime/CI integration remain
-unimplemented; production workflows and GitHub publication are unchanged.
+are unmeasured by T04. T05 adds independent verification; T07 trusted runtime/CI
+integration remains unimplemented. Production workflows and GitHub publication
+are unchanged.
+
+## T05 isolated deterministic verification
+
+`verification.Verifier().verify(source, repository_root, accepted_changes)`
+accepts an exact host `SourceIdentity`, a canonical absolute checkout, and the
+`TrustedChanges` returned by T02 policy acceptance. Raw proposals, JSON command
+requests, image names, environment settings, mount settings and shell commands
+are not execution authorization. The optional stack IDs are only
+`frontend-v1` and `backend-v1`; every affected stack must be included. These
+select complete immutable sequences, rather than allowing a caller to omit a
+guard. Executor injection is a trusted unit-test seam and never model input.
+
+The caller must load this package and its verifier files from a trusted policy
+installation, independently of the analyzed checkout. `TRUSTED_ROOT` identifies
+that installation; the analyzed root never supplies a Dockerfile or helper.
+This library does not authenticate a malicious Python host caller. T07 must
+provide that trusted installation and orchestrate the T04 handshake. T05 neither
+calls a provider nor resumes the model; its `report.host_result` can be passed
+to T04 later. The unchanged host contracts remain authoritative.
+
+### Source and proposal binding
+
+Preparation checks HEAD, canonical Git root, the expected GitHub origin,
+base/merge-base identity and the exact changed-file inventory against the
+accepted T02 context. Staged changes and every tracked file's raw Git blob hash
+are checked without running worktree clean filters, external diff, textconv,
+hooks or fsmonitor. The only allowed dirty tracked preparation file is this
+trusted README. Untracked application material is rejected. Tracked symlinks,
+submodules, executable modes, unsafe filesystem types and hardlinks fail closed.
+Source SHA and canonical accepted-changes SHA-256 accompany every command.
+
+Dependency and runner changes are unsupported before image execution. Fixed
+rules cover package/lock files, Vite/Vitest/Jest/Babel/TypeScript configuration,
+Python requirements, pyproject/setup/tox/pytest/coverage configuration and every
+conftest. All required current dependency/configuration files also have fixed
+trusted SHA-256 pins. Unknown executable configuration and unsupported test
+discovery conventions fail closed; PR instructions cannot broaden these rules.
+
+Only bounded tracked application/test material is copied: frontend src and
+Storybook TS/TSX, CSS/JSON, index and the fixed config/manifests; backend app/tests
+Python and fixed manifests/configuration; root pytest.ini. Git/GitHub metadata,
+automation, host dependencies/environments, caches, build/coverage/review output,
+`.env*`, credential/SSH paths and model files are excluded. Input is capped at
+1,000 admitted files, 2 MiB per file and 8 MiB total. Descriptor-relative reads
+use no-follow/nonblocking handles and require regular single-link files.
+
+The host creates private temporary baseline and patched trees from identical
+checked bytes. The real checkout receives no application/test edits. Accepted
+CREATE/UPDATE operations are revalidated immediately before descriptor-based
+writes, including path, operation, missing target/original SHA, mode, inode and
+link count. No model patch text is passed to git apply. Copied file permissions
+are normalized for non-root reading only after revalidation/application.
+
+### Build plane and execution plane
+
+`build_image()` makes a fresh bounded build context containing exactly the
+trusted Dockerfile, runner, shared profile definitions, collection hook,
+package.json/package-lock.json and requirements.txt. It has **no PR source or
+generated tests**. Node dependencies use npm ci with lifecycle scripts disabled;
+Python uses the unchanged pinned requirements. Reduced npm socket concurrency
+addresses observed intermittent build-network failures. Build network access
+is fixed host configuration; no credentials, tokens, proxy environment,
+credential files or host Docker client configuration are inherited. Each client
+gets a fresh empty temporary HOME/Docker-config directory. No build secrets or
+build arguments are accepted. Runtime installation is absent.
+
+Official base versions match ordinary CI: Node 22.23.2 and Python 3.12.13,
+both Debian bookworm slim. Successful registry pulls verified these pinned
+references during development:
+
+```text
+node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
+python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2
+```
+
+Provenance records Dockerfile/helper/dependency hashes, base references, actual
+build exit code, local image ID and actual RepoDigests. An image label binds the
+entire trusted context. Before reuse, current preparation hashes, image ID,
+entrypoint, user, environment and absence of volumes/healthchecks are inspected.
+Changing trusted helpers invalidates old image evidence and requires rebuilding.
+
+Only after building does sanitized input enter the execution plane. Each command
+gets a fresh ephemeral container, a read-only sanitized `/input` bind, and these
+fixed controls, checked against effective Docker inspect values before start:
+
+| Control | Value |
+| --- | --- |
+| User | 10001:10001 |
+| Network / IPC / PID | none / none / private |
+| Capabilities / privileges | drop ALL; no-new-privileges; never privileged |
+| Seccomp | daemon builtin default required by Docker info; never unconfined |
+| Root filesystem | read-only |
+| Memory / swap / CPUs / PIDs / open files | 1 GiB / no extra swap / 2 / 128 / 1024 |
+| Tool wall timeout / ordinary Docker client timeout | 120 seconds / 20 seconds |
+| Build timeout | 600 seconds |
+| Writable tmpfs | /work 256 MiB; /tmp 64 MiB; /reports 1 MiB |
+| Runtime logging | Docker log driver none; bounded captured data only |
+
+There are no device, Docker-socket, credential, runner-workspace or writable host
+mounts, port publishing, extra hosts or inherited host environment. Tmpfs is
+nosuid/nodev; /tmp and /reports are also noexec. /work permits normal framework
+operation. The runner sets an explicit minimal child environment. Containers
+never install dependencies or access the network.
+
+All host subprocesses use fixed executables, validated argv tuples, shell=False,
+bounded pipes and hard deadlines. Timeout kills the client process group and
+the finally block forcibly removes the actual container. A host-generated name
+exists before create, so create timeouts and malformed IDs also get cleanup.
+An exact-name daemon list must confirm absence; a failed client is never proof
+of removal. Cleanup failure prevents verification success.
+
+### Fixed profiles and UPDATE guards
+
+The shared immutable registry fixes direct installed binaries; no npm scripts
+or PR-selected commands run.
+
+| Stack | Required sequence |
+| --- | --- |
+| frontend-v1 | baseline typecheck; baseline suite; patched typecheck; changed-test suite; full patched suite with V8 coverage |
+| backend-v1 | baseline suite; changed-test suite; full patched suite with branch coverage |
+
+All baseline guards across selected stacks run before patched checks. Test lists
+come from host enumeration of recognized paths, not model filters. Targeted
+paths come exclusively from accepted edits and undergo renewed path validation.
+Full patched lists include every CREATE and UPDATE. Vitest CLI paths are substring
+filters, so the trusted runner additionally removes every nonselected recognized
+test from that command's temporary discovery tree and the host requires the
+exact collected-file inventory in the report. No permanent test is removed.
+
+CREATE paths are absent on baseline. UPDATE paths alone are excluded from its
+guard list; every other pre-existing test remains. Frontend baseline typecheck
+uses a small host-generated tsconfig extending the pinned project config,
+preserving existing/default exclusions and adding only accepted UPDATE paths.
+The patched typecheck uses the normal project config. TypeScript can still
+follow imports of an excluded test; that conservatively fails the guard. An
+empty baseline test inventory is unsupported, since the unchanged HostResult
+contract requires actual successful baseline test collection.
+
+Vitest uses its supported runner config loader because the default bundle loader
+attempted to write inside read-only node_modules during actual smoke. This only
+changes temporary config loading, not coverage include/exclude rules. Backend
+uses Python -I, explicit pinned pyproject configuration, disabled ambient plugin
+autoload and the image-owned collection hook. The full backend profile explicitly
+loads pytest-cov and preserves source, branch and omit semantics. Full profiles
+change coverage reporters/output locations only. Coverage has no pass threshold.
+
+### Evidence, reports and verdicts
+
+Framework schemas were checked against installed Vitest 4.1.11 reporter code and
+pytest 9.1.1 JUnit implementation. JSON duplicate keys/non-finite values, invalid
+types, impossible/inconsistent counts, duplicate files/cases, unexpected paths,
+missing reports and zero collection fail closed. JUnit DTD/entities are rejected;
+an image-owned pytest hook supplies the actual session.testscollected and file
+inventory, rather than mislabeling collection errors as collected tests. Both
+targeted and full suites require exit 0, positive collection, passed tests, no
+failures/errors and nonzero collection in every selected file.
+
+Docker exec supplies the host-observed tool exit code. After it terminates, a
+fixed image-owned exporter stops every surviving process except itself and idle
+PID 1 before reading named reports through no-follow regular single-link file
+handles. Docker archive-copy did not expose tmpfs reports on the tested daemon;
+the exporter instead sends a bounded canonical base64 JSON packet. The container
+is then paused, inspected and removed. Framework files remain bounded to 128 KiB
+each, report tmpfs to 1 MiB and transfer packets to 1 MiB. Reports are never read
+as instructions or mounted writable on the host.
+
+Host-owned temporary output contains bounded framework files and command JSON.
+`VerificationReport.to_bytes()` excludes its host output-directory handle and
+uses only relative report references. Detailed command evidence includes profile
+and command IDs, kind, image/source/change identities, duration, actual exit,
+timeout, test counts, report hashes/bytes and observed stdout/stderr hashes/bytes.
+Each output pipe retains at most 32 KiB while hashing/counting drained bytes.
+Raw logs are not persisted or rendered; workflow command syntax, ANSI escapes,
+URLs and shell-looking output remain uninterpreted data. T06 owns later rendering.
+
+Typecheck evidence has **no collected-test count** and is retained separately as
+CommandEvidence. Its exit status still gates the final verdict. Actual test
+executions alone produce existing VerifierResult records (at most six for both
+stacks), which fit T04's unchanged eight-record handshake budget.
+
+| Outcome | Host status |
+| --- | --- |
+| Exact source/context/edit mismatch | STALE |
+| Dependency/configuration/layout unsupported | UNSUPPORTED |
+| Image, daemon, isolation or cleanup unavailable | UNAVAILABLE |
+| Unrelated baseline guard fails | BASELINE_FAILED |
+| Patched typecheck, targeted/full tests or report/collection validation fails | VERIFICATION_FAILED |
+| Every required guard and patched check passes | VERIFIED |
+
+### Local validation and remaining boundaries
+
+Deterministic orchestration tests execute no proposal code on the host:
+
+```sh
+backend/.venv/bin/python -m pytest automation/tests/test_verification.py -q
+backend/.venv/bin/python -m pytest automation/tests -q
+backend/.venv/bin/python -m compileall -q automation
+git diff --check
+```
+
+The separately gated integration module builds the trusted image and exercises
+actual baselines, good/broken/zero-collection synthetic proposals, timeout cleanup
+and dummy-only isolation probes inside Docker:
+
+```sh
+T05_DOCKER_SMOKE=1 backend/.venv/bin/python -m pytest automation/tests/test_verification_docker.py -q
+```
+
+The gate prevents ordinary automation tests from requiring Docker/network/model
+services. The smoke's portable bounded evidence is written outside the source
+tree to `/mnt/data/T05-docker-evidence.json`. No real credential is used. The
+review report records the actual command outcomes and image identity; the
+presence of integration tests alone is not evidence that they passed.
+
+Actual Docker execution on source
+`b9dd41a28f223f210e73a3071656a422584c75e3` passed baseline frontend typecheck,
+18 frontend tests and 21 backend tests. The good two-stack CREATE proposal
+passed patched typecheck, one targeted test per stack, 19 full frontend tests
+and 22 full backend tests, with the existing coverage settings. Each deliberately
+broken targeted proposal collected one test, exited 1 and became
+VERIFICATION_FAILED. Exact image identity, final smoke matrix and local check
+results are recorded in the external T05 review evidence, not inferred from
+these fixture definitions.
+
+Docker shares the host kernel and trusts its daemon/runtime, local policy
+installation and private temporary-directory ownership. This is not a VM or
+an independent attestation of framework reports: hostile test code can affect
+its framework's process/report content inside the sandbox. Host-observed exits,
+strict schemas and collection checks do not prove semantic assertions or defeat
+all report forgery. T02 lexical anti-weakening checks and human review remain
+necessary. No model can alter host permissions, network, mounts or profiles.
+Daemon failure can prevent confirmed removal; that is explicitly unavailable,
+never a verified result. Report tampering, shared-kernel isolation and Linux/Docker
+portability are residual limits, not hidden success claims.
+
+T06 reporting/publication and T07 provider/runtime/CI orchestration remain pending.
+No production workflow, ordinary CI edit, application edit, provider invocation,
+model download, hosted service activation or GitHub write belongs to T05.
