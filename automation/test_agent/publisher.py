@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 from .github import CollectionError, Response, integer, repository, sha
 from .provider import canonical, strict_json
-from .reporting import (MARKER, MAX_COMMENT_BYTES, PatchDelivery, PreparedReport,
+from .reporting import (MARKER, MARKER_FAMILY, MAX_COMMENT_BYTES, PatchDelivery, PreparedReport,
                         PublicationIdentity, ReportingError, parse_marker)
 
 
@@ -61,6 +61,8 @@ class PullRequestSnapshot:
     state: str
     base_sha: str
     head_sha: str
+    head_repository: str | None = None
+    head_repository_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -257,14 +259,14 @@ class GitHubPublisherAdapter:
                 raise ValueError()
             integer(obj["number"], 1)
             base, head = obj["base"], obj["head"]
-            for part in (base, head):
-                if repository(part["repo"]["full_name"]) != self.repository:
-                    raise ValueError()
-                integer(part["repo"]["id"], 1)
-            if head["repo"]["id"] != base["repo"]["id"]:
+            if repository(base["repo"]["full_name"]) != self.repository:
                 raise ValueError()
+            integer(base["repo"]["id"], 1)
+            repository(head["repo"]["full_name"])
+            integer(head["repo"]["id"], 1)
             return PullRequestSnapshot(self.repository, base["repo"]["id"], number,
-                                       obj["state"], sha(base["sha"]), sha(head["sha"]))
+                                       obj["state"], sha(base["sha"]), sha(head["sha"]),
+                                       head["repo"]["full_name"], head["repo"]["id"])
         except Exception:
             raise PublicationError("invalid publisher PR identity") from None
 
@@ -332,7 +334,9 @@ def _current(snapshot, identity):
     return (type(snapshot) is PullRequestSnapshot and snapshot.state == "open"
             and snapshot.repository == identity.repository and snapshot.repository_id == identity.repository_id
             and snapshot.number == identity.pr_number and snapshot.head_sha == identity.head_sha
-            and snapshot.base_sha == identity.base_sha)
+            and snapshot.base_sha == identity.base_sha
+            and (snapshot.head_repository or snapshot.repository) == identity.head_repository
+            and (snapshot.head_repository_id or snapshot.repository_id) == identity.head_repository_id)
 
 
 def publish(report, adapter: GitHubPublisherAdapter, author: PublisherAuthor):
@@ -354,7 +358,7 @@ def publish(report, adapter: GitHubPublisherAdapter, author: PublisherAuthor):
         return PublicationResult(PublicationState.STALE)
     matching = []
     for comment in adapter.comments(i.pr_number):
-        if comment.author != author or MARKER not in comment.body:
+        if comment.author != author or (MARKER not in comment.body and MARKER_FAMILY + "v1" not in comment.body):
             continue
         try:
             old = parse_marker(comment.body)

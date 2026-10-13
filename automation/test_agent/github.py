@@ -74,10 +74,12 @@ class ReadTransport(Protocol):
 # Even the concrete transport accepts only the adapter's fixed endpoint grammar.
 _ENDPOINT = re.compile(
     r"/repos/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+/(?:"
-    r"actions/runs/[1-9][0-9]*|pulls/[1-9][0-9]*(?:/files)?|"
+    r"actions/runs/[1-9][0-9]*|actions/workflows/(?:ci|test-agent)\.yml|"
+    r"pulls/[1-9][0-9]*(?:/files)?|"
     r"commits/[0-9a-f]{40}/pulls|compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|"
     r"git/(?:commits|trees|blobs)/[0-9a-f]{40})"
 )
+_REPOSITORY_ENDPOINT = re.compile(r"/repos/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+")
 
 
 class GitHubHTTPTransport:
@@ -90,7 +92,7 @@ class GitHubHTTPTransport:
         self._token = token
 
     def get(self, path, query=()):
-        if type(path) is not str or _ENDPOINT.fullmatch(path) is None:
+        if type(path) is not str or not (_ENDPOINT.fullmatch(path) or _REPOSITORY_ENDPOINT.fullmatch(path)):
             raise CollectionError("unsupported GitHub endpoint")
         repository("/".join(path.split("/")[2:4]))
         # Only integer pagination and recursive-tree switches; no URL-bearing query.
@@ -208,6 +210,15 @@ class GitHubReader:
 
     def workflow_run(self, run_id):
         return self._object(f"/actions/runs/{integer(run_id, 1)}")
+
+    def repository_metadata(self):
+        return self._object("")
+
+    def ordinary_ci_workflow(self):
+        return self._object("/actions/workflows/ci.yml")
+
+    def agent_workflow(self):
+        return self._object("/actions/workflows/test-agent.yml")
 
     def pull_request(self, number):
         return self._object(f"/pulls/{integer(number, 1)}")

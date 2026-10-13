@@ -8,7 +8,7 @@ from types import MappingProxyType
 
 from .contracts import EditOperation
 from .provider import canonical, digest
-from .reporting import (ReportingError, bind_evidence, prepare_report,
+from .reporting import (ReportingError, bind_evidence, report_status, DeliveryState,
                         verification_metadata)
 from .verification import Stale, _root, admitted, safe_read, safely_missing
 
@@ -130,14 +130,14 @@ def _diff(old, new, path, create):
     return "".join(parts).encode("utf-8")
 
 
-def build_patch(bundle, result, repository_root, verification=None):
+def build_patch(bundle, result, repository_root, verification=None, *, publication=None):
     """No shell/Git, no raw model patch, no apply. Recheck exact T03 head bytes.
 
     T03's authenticated Git blob identifies the original independently of local
     Git metadata. No-follow reads must match that content, SHA-256 and T02 mode.
     """
     try:
-        bind_evidence(bundle, result, verification)
+        bind_evidence(bundle, result, verification, publication=publication)
     except ReportingError:
         raise ArtifactError("artifact input binding rejected") from None
     if result.proposal is None or not result.proposal.edits:
@@ -186,26 +186,28 @@ def _manifest(identity, entries):
     return canonical({"schema_version": 1, "artifact_logical_name": "test-agent-final",
                       "source_head_sha": identity.head_sha, "policy_sha": identity.policy_sha,
                       "run_id": identity.workflow_run_id, "run_attempt": identity.run_attempt,
+                      "source_ci_run_id": identity.source_ci_run_id,
+                      "source_ci_run_attempt": identity.source_ci_run_attempt,
                       "entries": [{"relative_path": e.name, "byte_size": len(e.data),
                                    "sha256": digest(e.data), "classification": e.classification}
                                   for e in entries]})
 
 
-def build_bundle(bundle, result, repository_root, verification=None):
+def build_bundle(bundle, result, repository_root, verification=None, *, publication=None):
     try:
-        bound = bind_evidence(bundle, result, verification)
-        report = prepare_report(bundle, result, verification)
+        bound = bind_evidence(bundle, result, verification, publication=publication)
     except ReportingError:
         raise ArtifactError("artifact input binding rejected") from None
     try:
-        patch = build_patch(bundle, result, repository_root, verification)
+        patch = build_patch(bundle, result, repository_root, verification, publication=publication)
         state = PatchPreparationState.NOT_REQUIRED if patch is None else PatchPreparationState.PREPARED
     except PatchUnavailable:
         patch, state = None, PatchPreparationState.UNAVAILABLE
     # Preparation is not delivery. AVAILABLE needs a later trusted upload receipt.
     metadata = {"schema_version": 1, "identity": asdict(bound.identity),
-                "final_status": report.status, "patch_preparation": str(state),
-                "patch_delivery": str(report.delivery.state),
+                "final_status": report_status(bound), "patch_preparation": str(state),
+                "patch_delivery": str(DeliveryState.UNAVAILABLE if result.proposal and result.proposal.edits
+                                      else DeliveryState.NOT_REQUIRED),
                 "required_edits": bool(result.proposal and result.proposal.edits),
                 "skills": [asdict(s) for s in bound.skills]}
     data = {"verification.json": canonical(verification_metadata(bound)),

@@ -1,4 +1,4 @@
-# Trusted test-agent boundaries (T02 through T06)
+# Trusted test-agent boundaries (T02 through T07)
 
 This package uses only the Python standard library. It parses model proposals,
 checks trusted context and test-edit policy, and constructs immutable changes.
@@ -688,7 +688,7 @@ never a verified result. Report tampering, shared-kernel isolation and Linux/Doc
 portability are residual limits, not hidden success claims.
 
 T06 consumes this evidence without changing verifier verdicts; its boundaries
-are described below. T07 provider/runtime/CI orchestration remains pending.
+are described below. T07 orchestration is described in the final section.
 No production workflow, ordinary CI edit, application edit, provider invocation,
 model download, hosted service activation or GitHub write belongs to T05.
 
@@ -700,8 +700,10 @@ complete source identities must agree, including the policy SHA. Accepted
 changes must exactly match proposal edits and context path inventories; verifier
 commands and results must bind to the head and SHA-256 of those exact canonical
 changes. An agent feedback result must equal the verifier's host result.
-Workflow metadata supplies numeric run/attempt/repository identities; it must
-agree with the source head and run ID. Arbitrary execution dictionaries and
+Source workflow metadata supplies numeric CI run/attempt/repository identities;
+it must agree with the source head and run ID. The separate `AgentRun` argument
+supplies publication order. T07 always supplies it explicitly; the default exists
+only for compatibility with the original offline T06 callers. Arbitrary execution dictionaries and
 model-produced reporting objects are rejected. Caller-supplied Python objects
 are trusted capabilities, not an authentication mechanism for uploaded JSON.
 
@@ -744,9 +746,9 @@ patch links require a trusted numeric artifact receipt for that same run.
 ### Sticky publisher and future permission boundary
 
 `publisher.publish(prepared_report, adapter, expected_author)` uses one exact
-first-line hidden marker, `taskly-unit-test-agent-report:v1`. Its strict grammar
-encodes repository/PR, head/policy/base/merge-base SHAs, repository ID, workflow
-run and attempt. Only comments matching the expected numeric author ID, exact
+first-line hidden marker, `taskly-unit-test-agent-report:v2`. Its strict grammar
+encodes repository/PR, head/policy/base/merge-base SHAs, repository ID, source CI
+run/attempt, agent publication run/attempt and exact head repository identity. Only comments matching the expected numeric author ID, exact
 login and account type participate. A copied marker from another author is
 ignored. Zero owned comments creates one; one updates the same ID; duplicate
 or malformed owned markers fail closed. No comments are deleted.
@@ -768,17 +770,17 @@ comments, and 100 comments total. HTTP socket inactivity and absolute request
 deadline are ten seconds. Exceptions suppress remote/token-bearing details.
 All write tests use a deterministic fake; concrete HTTP tests replace connections.
 
-T07 must serialize publisher operations per PR: GitHub issue comments have no
+T07 serializes publisher jobs per validated repository ID and PR number: GitHub issue comments have no
 atomic compare-and-swap with PR metadata or comment ordering. The two reads
 reduce races but cannot remove the final read/write gap. Writes with lost
 responses are indeterminate and are not retried here; subsequent discovery is
 required. Pagination exhaustion also fails instead of guessing ownership.
 
-Only the future dedicated publisher job may receive `issues: write`. Context,
+Only the dedicated publisher job receives `issues: write` after trusted-main installation. Context,
 inference, patch generation, verification and artifact preparation keep read-only
 or absent write credentials. Neither the model, generated tests nor Docker may
-receive the publisher token. No permission change or production workflow is
-installed by this package.
+receive the publisher token. The production definition is prepared on the development branch; trusted-main
+installation and live execution remain separate approval gates.
 
 ### Deterministic artifact data and delivery
 
@@ -825,9 +827,176 @@ Focused offline checks:
 backend/.venv/bin/python -m pytest automation/tests/test_reporting.py automation/tests/test_publisher.py automation/tests/test_artifacts.py -q
 ```
 
-T07 still needs the trusted installation/input handoff, provider bootstrap,
-per-PR serialization, approved permissions, allowlisted upload orchestration and
-receipt delivery. This library does not authenticate an untrusted host process,
+T07 adds the installation/input handoff, pinned runtime bootstrap, per-PR
+serialization, separate permissions and receipt delivery described below. This library does not authenticate an untrusted host process,
 prove test semantics, implement uploads or attest the verifier's framework
 files independently. No live GitHub write, artifact upload, Docker execution or
 model invocation is needed to test T06.
+
+## T07 trusted workflow wiring
+
+The development branch contains `.github/workflows/test-agent.yml`; this is
+reviewable offline wiring, not evidence of a live integration. Automatic runs
+require the workflow on trusted `main`. Ordinary CI remains independent and
+unchanged. The only triggers are completed `Ordinary CI` workflow runs and a
+manual dispatch accepting `ordinary_ci_run_id`. Dispatch reprocesses the selected
+CI evidence with a new agent run; it accepts no authoritative source or policy
+SHA. Push-origin automatic CI runs are not applicable and never start generation;
+manual dispatch rejects a push-origin source run.
+
+Before expensive work, both the workflow and host require the exact public
+`kreshby/cloudfide-test-agent` repository on a standard hosted `ubuntu-24.04`
+runner. The API repository name and numeric ID must match the platform identity. The
+public repository gate is refreshed after context collection, before source
+checkout/model work.
+The fixed CI workflow endpoint supplies the active workflow ID, name and path;
+these must agree with the completed source run, its event, conclusion, attempt
+and exact head. The workflow-run event snapshot must also agree. A bounded commit
+association must identify exactly one current open PR, and direct PR reads must
+confirm its base/head and head repository. Missing, stale or ambiguous identities
+fail without a publication target. Branch names and event PR-array ordering grant
+no authority.
+
+A known fork receives an `UNSUPPORTED` report without T03 collection, checkout,
+model or generated-code execution. T03's same-repository restriction remains
+unchanged. A known same-repository PR whose source CI did not succeed receives
+`UNAVAILABLE` without inventing a baseline verdict. After T03, changes without a
+supported frontend/backend source or test target receive `UNSUPPORTED` before
+inference. These fork/docs outcomes use a successful job conclusion and explicitly
+state that no verification occurred. Runtime, agent, policy, verifier, publication
+and unresolved delivery failures fail the workflow after reporting when possible.
+An unsupported verifier outcome with required edits also remains unresolved.
+
+### Code and execution boundaries
+
+Both jobs check out `github.workflow_sha` into `trusted` with credential
+persistence disabled. The host requires the exact main workflow ref, checks its
+current run through the fixed agent workflow endpoint, and verifies the installed
+checkout HEAD and clean tracked bytes. The policy SHA is the Git blob identity of
+the installed `automation/test_agent/policy.py`, checked against the trusted
+commit. The trusted workflow commit is also carried in the report/handoff.
+PR copies of automation, policies and skills are data and are never imported.
+
+Source acquisition uses a separate temporary checkout, the fixed public HTTPS
+origin and validated exact head/base SHAs. It uses no token, credential helper,
+hooks, external configuration, redirect or PR-selected remote. Before analysis,
+HEAD, origin, merge-base and clean working-tree state must match the context.
+The checkout is removed after preparation. The actual T04 `UnitTestAgent` runs
+with `LocalLlamaProvider`. Only accepted T02 changes reach the unchanged T05
+Docker verifier. Its bound actual `HostResult` is then passed to `agent.resume`;
+no-edit decisions and unavailable verifier calls receive no invented execution
+records. Feedback failure preserves supplied host verification facts.
+
+| Job | Permissions | Timeout |
+| --- | --- | --- |
+| prepare: preflight, context, agent, verifier, artifact | actions/contents/pull-requests read | 45 minutes |
+| publisher: revalidation and one sticky comment | contents/actions/pull-requests read; issues write | 5 minutes |
+
+Top-level permissions are empty. The publisher token exists only in the publisher
+job. The model child gets a fixed environment containing PATH, private HOME and
+TMPDIR, LANG/LC_ALL, GIT_CONFIG_NOSYSTEM/GLOBAL, GIT_TERMINAL_PROMPT and
+OMP_NUM_THREADS. It inherits no GitHub/Actions/cloud/SSH/proxy/token variables.
+The original T05 build/execution environments, denied network, mounts and limits
+remain unchanged; containers receive neither repository Git metadata, automation,
+workflow files, host/model environments nor tokens.
+
+### Pinned local runtime and bounds
+
+`runtime.LocalRuntime` reuses P01's exact-commit CPU source build and process
+supervisor. It offers no model selection, URL, shell command or provider fallback.
+The one selected runtime is:
+
+| Pin | Value |
+| --- | --- |
+| Runtime | qwen25-coder-7b-q4km |
+| Model repository | Qwen/Qwen2.5-Coder-7B-Instruct-GGUF |
+| Revision | 13fb94bfda8c8cf22497dc57b78f391a9acb426a |
+| File | qwen2.5-coder-7b-instruct-q4_k_m.gguf |
+| Bytes | 4683073536 |
+| SHA-256 | 509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c |
+| llama.cpp | v0.6.0, d81235049384534c167caea52b85a694f6103d14 |
+
+Only the fixed GitHub llama source and model resolve URL are used. Model redirects
+are limited to four and to HTTPS Hugging Face subdomains or approved `.hf.co`
+object storage. Exact bytes and SHA-256 are required; an incomplete model is
+removed. Model acquisition keeps a 2 GiB disk reserve and has a 180-second shared
+absolute deadline with 10-second socket inactivity bounds. Setup is limited to
+420 seconds, each startup to 90 seconds, source checkout to 120 seconds and the
+host preparation to 2,640 seconds. Existing T03, T04 and T05 limits are unchanged:
+GitHub reads use 10-second requests and the existing request/byte budgets; T04
+allows six calls, 150 seconds per call and 600 active seconds overall; T05 limits
+image build to 600 seconds and each tool to 120 seconds.
+
+The loopback server uses port 8765, CPU only, four threads, context 8192, parallel
+one, temperature zero, seed 42, Jinja, disabled reasoning, offline operation,
+no web UI and no context shift. Its default prediction cap is 768 to accommodate
+T04's edit stage; each T04 request retains its existing smaller stage cap. Both
+process pipes retain at most 16 KiB and discard excess; raw captures are never
+exported. Host children inherit a 12 GiB address-space limit, 6 GiB per-file limit
+and disabled core dumps. Model memory is released before Docker build/verification;
+one restart of the same already-verified model supports feedback. Finally blocks
+stop the entire process group and remove temporary source/build/model files.
+There is no model/dependency cache, package registry or paid service.
+
+### Identity, handoff and delivery
+
+The source identity retains the originating CI run/attempt, exact head, base,
+merge-base and policy SHA. Agent publication identity retains the current agent
+run/attempt. Sticky v2 ordering is lexicographic `(agent run ID, agent attempt)`;
+a newer dispatch can therefore supersede a publication for the same source CI.
+Equal order is idempotent only for identical identity and body. Existing owned
+v1 markers fail closed and require review rather than automatic migration.
+Expected author is fixed to GitHub's `github-actions[bot]`, numeric ID 41898282,
+account type Bot. Known fork reports also bind the exact fork repository ID/name;
+this does not authorize fork execution.
+
+The publisher serializes on validated repository ID and PR number, with
+`cancel-in-progress: false`. It reruns source/PR validation and requires its
+concurrency target to match before accepting a handoff. The intermediate artifact
+is `test-agent-handoff-<current run>-<attempt>`, contains only `handoff.json`, and
+expires after one day. Download uses the current run only, never originating CI
+artifacts. The canonical JSON schema is version 1 with exactly `schema_version`,
+`identity`, `source`, `source_ci`, `trusted_workflow_sha` and `facts`. All nested
+schemas are exact; duplicate keys, null identity substitutions, unknown fields,
+noncanonical encoding, oversized data and mismatched facts are rejected. The
+192 KiB maximum includes the whole handoff; its SHA-256 must match the trusted
+producer job output. Identity is independently rederived from GitHub and the
+installed policy. No pickle, eval, rendered comment, model transcript, arbitrary
+provider text, raw logs, test code or absolute output handle is transported.
+Each advisory decision carries only target, action, changed behavior and rationale
+from the validated plan. Text retains TestPlan's 4,096-character contract and
+T06's control/Unicode restrictions; display uses inert escaping and the existing
+2 KiB per-field clipping budget. Advisory recommendations are shown separately
+from host evidence. Actual loaded skills show both content and loaded-content
+hashes. Pre-agent terminal envelopes contain no advisory or execution facts;
+selected verification records are validated through T06 before rendering.
+
+Final uploads use only T06's `ArtifactBundle` entries: `manifest.json`,
+`verification.json`, `report-metadata.json` and, when prepared,
+`generated-tests.patch`. The hard ceiling remains 10 MiB and final retention is
+seven days. The final name uses only current run/attempt. A patch link requires
+the numeric receipt from the successful pinned upload action. Failure to prepare
+or upload required edits leaves delivery `UNAVAILABLE`; the supplied verifier
+verdict is preserved and the workflow fails as unresolved. Non-edit/terminal
+reports have `NOT_REQUIRED` delivery. Only the named small files are uploaded;
+models, builds, dependencies, raw logs and repository dumps remain temporary.
+
+### Installation gate and remaining limitations
+
+Offline tests do not prove GitHub event shapes, artifact delivery, runner resource
+availability, local inference quality or end-to-end execution. API reads are
+bounded snapshots, not atomic transactions. A PR or source run can change before
+publication; identity revalidation then fails closed. Publisher serialization
+and ordering reduce races but cannot remove GitHub's final read/write gap. A lost
+write response is indeterminate and is not retried automatically. If preflight,
+metadata reads, handoff transfer or the publisher itself is unavailable, a comment
+may be impossible even for an otherwise known PR. T05's shared-kernel/report-forgery
+and semantic-test limitations remain. Handoff hashes authenticate transport from
+the trusted job outputs, not a compromised producer process.
+
+Live enablement requires human review, separate commit and push approval, green
+Ordinary CI, then explicit trusted-main installation approval. A separately
+approved same-repository demo must exercise automatic triggering, actual Qwen
+edits, Docker verification, final artifact delivery and publication. A subsequent
+commit must automatically update the same sticky comment. Until this gate has
+actual evidence, final T07 acceptance remains incomplete.

@@ -123,7 +123,7 @@ def test_malformed_owned_marker_cannot_select_a_comment(tmp_path, mutation):
 
 def test_similar_marker_does_not_select_comment(tmp_path):
     prepared = report(tmp_path)
-    other = prepared.body.replace("taskly-unit-test-agent-report:v1", "taskly-unit-test-agent-report:other")
+    other = prepared.body.replace("taskly-unit-test-agent-report:v2", "taskly-unit-test-agent-report:other")
     transport = FakeTransport(prepared.identity, [FakeTransport.comment(9, other)])
     assert send(prepared, transport).state == PublicationState.CREATED
     assert transport.comment_values[0]["body"] == other

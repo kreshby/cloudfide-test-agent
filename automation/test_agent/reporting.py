@@ -28,7 +28,8 @@ from .verification import CommandEvidence, Counts, VerificationReport
 from automation.verifier.profiles import PROFILES
 
 
-MARKER = "taskly-unit-test-agent-report:v1"
+MARKER = "taskly-unit-test-agent-report:v2"
+MARKER_FAMILY = "taskly-unit-test-agent-report:"
 MAX_COMMENT_BYTES = 48 * 1024
 MAX_ADVISORY_BYTES = 2 * 1024
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -36,12 +37,25 @@ _MARKER = re.compile(
     r"<!-- " + MARKER + r" repository=([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)"
     r" pr=([1-9][0-9]{0,18}) head=([0-9a-f]{40}) policy=([0-9a-f]{40})"
     r" run=([1-9][0-9]{0,18}) attempt=([1-9][0-9]{0,18})"
-    r" base=([0-9a-f]{40}) merge_base=([0-9a-f]{40}) repository_id=([1-9][0-9]{0,18}) -->"
+    r" base=([0-9a-f]{40}) merge_base=([0-9a-f]{40}) repository_id=([1-9][0-9]{0,18})"
+    r" source_ci=([1-9][0-9]{0,18}) source_attempt=([1-9][0-9]{0,18})"
+    r" head_repository=([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+) head_repository_id=([1-9][0-9]{0,18}) -->"
 )
 
 
 class ReportingError(ValueError):
     """Fixed messages only, with no untrusted input or credential exception chain."""
+
+
+@dataclass(frozen=True)
+class AgentRun:
+    """Current host workflow identity; never modifies the originating CI source."""
+    run_id: int
+    run_attempt: int
+
+    def __post_init__(self):
+        integer(self.run_id, 1)
+        integer(self.run_attempt, 1)
 
 
 @dataclass(frozen=True)
@@ -55,11 +69,25 @@ class PublicationIdentity:
     base_sha: str
     merge_base_sha: str
     repository_id: int
+    source_ci_run_id: int | None = None
+    source_ci_run_attempt: int | None = None
+    head_repository: str | None = None
+    head_repository_id: int | None = None
 
     def __post_init__(self):
+        # Preserve T06 callers' local fixture API. Production always supplies
+        # explicit agent and source identities; no implicit fallback in T07.
+        for name, fallback in (("source_ci_run_id", self.workflow_run_id),
+                               ("source_ci_run_attempt", self.run_attempt),
+                               ("head_repository", self.repository),
+                               ("head_repository_id", self.repository_id)):
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, fallback)
         try:
             repository(self.repository)
-            for value in (self.pr_number, self.workflow_run_id, self.run_attempt, self.repository_id):
+            repository(self.head_repository)
+            for value in (self.pr_number, self.workflow_run_id, self.run_attempt, self.repository_id,
+                          self.source_ci_run_id, self.source_ci_run_attempt, self.head_repository_id):
                 integer(value, 1)
             for value in (self.head_sha, self.policy_sha, self.base_sha, self.merge_base_sha):
                 sha(value)
@@ -79,21 +107,25 @@ class PublicationIdentity:
         return (f"<!-- {MARKER} repository={self.repository} pr={self.pr_number}"
                 f" head={self.head_sha} policy={self.policy_sha} run={self.workflow_run_id}"
                 f" attempt={self.run_attempt} base={self.base_sha} merge_base={self.merge_base_sha}"
-                f" repository_id={self.repository_id} -->")
+                f" repository_id={self.repository_id} source_ci={self.source_ci_run_id}"
+                f" source_attempt={self.source_ci_run_attempt} head_repository={self.head_repository}"
+                f" head_repository_id={self.head_repository_id} -->")
 
 
-def parse_marker(body):
+def parse_marker(body, *, expected=None):
     """Only the exact first-line grammar is metadata. Similar text is not authority."""
     if type(body) is not str or body.count(MARKER) != 1:
         raise ReportingError("invalid sticky marker")
     match = _MARKER.fullmatch(body.split("\n", 1)[0])
     if match is None:
         raise ReportingError("invalid sticky marker")
-    repo, pr, head, policy, run, attempt, base, merge, repo_id = match.groups()
+    repo, pr, head, policy, run, attempt, base, merge, repo_id, ci, ci_attempt, head_repo, head_id = match.groups()
     identity = PublicationIdentity(repo, int(pr), head, policy, int(run), int(attempt),
-                                   base, merge, int(repo_id))
+                                   base, merge, int(repo_id), int(ci), int(ci_attempt), head_repo, int(head_id))
     if identity.marker() != body.split("\n", 1)[0]:
         raise ReportingError("noncanonical sticky marker")
+    if expected is not None and identity != expected:
+        raise ReportingError("sticky identity binding mismatch")
     return identity
 
 
@@ -224,7 +256,7 @@ class BoundEvidence:
     changes_sha256: str | None
 
 
-def bind_evidence(bundle, result, verification=None):
+def bind_evidence(bundle, result, verification=None, *, publication=None):
     """Validate the complete context/proposal/policy/verifier identity chain."""
     try:
         if type(bundle) is not ContextBundle or type(result) is not AgentResult:
@@ -241,9 +273,15 @@ def bind_evidence(bundle, result, verification=None):
                 or workflow.event not in {"pull_request", "push"}
                 or any(f.head_sha != source.head_sha for f in bundle.changed_files)):
             raise ValueError()
+        if publication is not None:
+            if type(publication) is not AgentRun:
+                raise ValueError()
+            publication.__post_init__()
+        agent_run = publication or AgentRun(workflow.run_id, workflow.run_attempt)
         identity = PublicationIdentity(source.repository, source.pr_number, source.head_sha,
-                                       source.policy_sha, workflow.run_id, workflow.run_attempt,
-                                       source.base_sha, source.merge_base_sha, workflow.repository_id)
+                                       source.policy_sha, agent_run.run_id, agent_run.run_attempt,
+                                       source.base_sha, source.merge_base_sha, workflow.repository_id,
+                                       workflow.run_id, workflow.run_attempt)
         if result.context_sha256 != bundle.sha256 or type(result.state) is not State:
             raise ValueError()
         if (type(result.recommendations) is not tuple or len(result.recommendations) > 2
@@ -442,8 +480,23 @@ _MEANINGS = {
 }
 
 
-def prepare_report(bundle, result, verification=None, *, delivery=None):
-    bound = bind_evidence(bundle, result, verification)
+def report_status(bound):
+    """Host classification independent of untrusted display text or delivery."""
+    result, verification = bound.agent, bound.verification
+    edited = bool(result.proposal and result.proposal.edits)
+    if result.state == State.FAILED:
+        status = "AGENT_FAILED"
+    elif verification is not None:
+        status = verification.host_result.status.value.upper().replace("-", "_")
+    elif edited:
+        status = "UNAVAILABLE"
+    else:
+        status = "UNSUPPORTED" if any(d.action == ModelAction.UNSUPPORTED for d in result.proposal.decisions) else "NO_TESTS_NEEDED"
+    return status
+
+
+def prepare_report(bundle, result, verification=None, *, delivery=None, publication=None):
+    bound = bind_evidence(bundle, result, verification, publication=publication)
     edited = result.proposal is not None and bool(result.proposal.edits)
     delivery = delivery if delivery is not None else PatchDelivery(
         DeliveryState.UNAVAILABLE if edited else DeliveryState.NOT_REQUIRED)
@@ -453,18 +506,12 @@ def prepare_report(bundle, result, verification=None, *, delivery=None):
     if (edited and delivery.state == DeliveryState.NOT_REQUIRED
             or not edited and delivery.state != DeliveryState.NOT_REQUIRED):
         raise ReportingError("delivery does not match required edits")
-    if result.state == State.FAILED:
-        status = "AGENT_FAILED"
-    elif verification is not None:
-        status = verification.host_result.status.value.upper().replace("-", "_")
-    elif edited:
-        status = "UNAVAILABLE"
-    else:
-        status = "UNSUPPORTED" if any(d.action == ModelAction.UNSUPPORTED for d in result.proposal.decisions) else "NO_TESTS_NEEDED"
+    status = report_status(bound)
     i = bound.identity
     lines = [i.marker(), "## Unit test agent", f"Final status: **{status}** — {_MEANINGS[status]}",
              f"PR head: `{i.head_sha}`", f"Policy: `{i.policy_sha}`",
-             f"Workflow run: {i.workflow_run_id}; attempt: {i.run_attempt}",
+             f"Source CI run: {i.source_ci_run_id}; attempt: {i.source_ci_run_attempt}",
+             f"Agent workflow run: {i.workflow_run_id}; attempt: {i.run_attempt}",
              f"[Run]({i.run_url})", "", "### Agent analysis (advisory)"]
     if result.proposal is None:
         lines.append("No proposal was produced.")

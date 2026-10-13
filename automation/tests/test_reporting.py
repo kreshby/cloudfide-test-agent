@@ -22,7 +22,7 @@ def test_exact_verdict_matrix_and_source_identity(tmp_path, status):
     assert report.status == expected
     assert f"Host verification: **{expected}**" in report.body
     assert bundle.source.head_sha in report.body and bundle.source.policy_sha in report.body
-    assert "Workflow run: 42; attempt: 1" in report.body
+    assert "Agent workflow run: 42; attempt: 1" in report.body
     assert parse_marker(report.body) == report.identity
     assert report.body == prepare_report(bundle, result, verification).body
     assert len(report.body.encode()) <= MAX_COMMENT_BYTES
