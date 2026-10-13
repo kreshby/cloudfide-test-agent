@@ -27,6 +27,17 @@ MAX_PAGES = 4
 PAGE_SIZE = 30
 MAX_COMMENTS = 100
 MAX_REMOTE_COMMENT_BYTES = 64 * 1024
+WRITE_PHASES = frozenset({"publisher-write-http-401", "publisher-write-http-403",
+                         "publisher-write-http-404", "publisher-write-http-422",
+                         "publisher-write-http-5xx", "publisher-write-http-other",
+                         "publisher-write-transport", "publisher-write-json",
+                         "publisher-write-receipt", "publisher-write-timeout"})
+
+
+def _write_http(status):
+    if type(status) is int and status in {401, 403, 404, 422}:
+        return f"publisher-write-http-{status}"
+    return "publisher-write-http-5xx" if type(status) is int and 500 <= status <= 599 else "publisher-write-http-other"
 
 
 class PublicationError(ValueError):
@@ -41,7 +52,9 @@ def _phase(category, operation, *args):
     try:
         return operation(*args)
     except PublicationError as error:
-        raise PublicationError(str(error), phase=category) from None
+        safe = error.phase if (category == "publisher-write-unavailable" and type(error.phase) is str
+                               and error.phase in WRITE_PHASES) else category
+        raise PublicationError(safe, phase=safe) from None
     except Exception:
         raise PublicationError(category, phase=category) from None
 
@@ -167,11 +180,13 @@ class GitHubPublisherHTTPTransport:
         deadline = time.monotonic() + TIMEOUT_SECONDS
         expired = threading.Event()
         timer = None
+        write = method in {"POST", "PATCH"}
 
         def remaining():
             seconds = deadline - time.monotonic()
             if expired.is_set() or seconds <= 0:
-                raise PublicationError("publisher request deadline exceeded")
+                raise PublicationError("publisher request deadline exceeded",
+                                       phase="publisher-write-timeout" if write else "publisher-read-unavailable")
             return seconds
 
         try:
@@ -197,7 +212,8 @@ class GitHubPublisherHTTPTransport:
             if response.status == 404 and method == "GET" and "/pulls/" in path:
                 return Response(404, b"")
             if response.status != expected:
-                raise PublicationError("GitHub publisher request failed")
+                raise PublicationError("GitHub publisher request failed",
+                                       phase=_write_http(response.status) if write else "publisher-read-unavailable")
             if response.getheader("Content-Encoding", "identity") != "identity":
                 raise PublicationError("unsupported publisher response encoding")
             length = response.getheader("Content-Length")
@@ -224,10 +240,14 @@ class GitHubPublisherHTTPTransport:
             if len(data) > MAX_RESPONSE_BYTES or len(link) > 8192:
                 raise PublicationError("publisher response byte limit exceeded")
             return Response(response.status, bytes(data), re.search(r';\s*rel="next"(?:\s*,|\s*$)', link) is not None)
-        except PublicationError:
+        except PublicationError as error:
+            if write and error.phase not in WRITE_PHASES:
+                raise PublicationError("publisher write transport rejected", phase="publisher-write-transport") from None
             raise
         except Exception:
-            raise PublicationError("GitHub publisher transport unavailable") from None
+            category = ("publisher-write-timeout" if expired.is_set() or time.monotonic() >= deadline
+                        else "publisher-write-transport") if write else "publisher-read-unavailable"
+            raise PublicationError("GitHub publisher transport unavailable", phase=category) from None
         finally:
             if timer is not None:
                 timer.cancel()
@@ -252,8 +272,14 @@ class GitHubPublisherAdapter:
         self.requests += 1
         try:
             response = self._transport.request(method, self._prefix + endpoint, query, body)
+        except PublicationError as error:
+            category = error.phase if (method != "GET" and type(error.phase) is str
+                                       and error.phase in WRITE_PHASES) else (
+                "publisher-write-transport" if method != "GET" else "publisher-read-unavailable")
+            raise PublicationError("publisher transport failed", phase=category) from None
         except Exception:
-            raise PublicationError("publisher transport failed") from None
+            raise PublicationError("publisher transport failed", phase=(
+                "publisher-write-transport" if method != "GET" else "publisher-read-unavailable")) from None
         if (type(response) is not Response or type(response.status) is not int
                 or type(response.body) is not bytes or type(response.has_next) is not bool):
             raise PublicationError("invalid publisher response")
@@ -263,11 +289,13 @@ class GitHubPublisherAdapter:
         if response.status == 404 and method == "GET" and endpoint.startswith("/pulls/") and not response.has_next:
             return None, False
         if response.status != expected:
-            raise PublicationError("publisher request failed")
+            raise PublicationError("publisher request failed", phase=(
+                _write_http(response.status) if method != "GET" else "publisher-read-unavailable"))
         try:
             return strict_json(response.body.decode(), MAX_RESPONSE_BYTES), response.has_next
         except Exception:
-            raise PublicationError("invalid publisher JSON") from None
+            raise PublicationError("invalid publisher JSON", phase=(
+                "publisher-write-json" if method != "GET" else "publisher-read-unavailable")) from None
 
     def pull_request(self, number):
         number = _integer(number)
@@ -322,18 +350,24 @@ class GitHubPublisherAdapter:
 
     def create_comment(self, number, body):
         value, more = self._json("POST", f"/issues/{_integer(number)}/comments", body=canonical({"body": body}))
-        if more:
-            raise PublicationError("unexpected write pagination")
-        return self._comment(value)
+        try:
+            if more:
+                raise PublicationError("unexpected write pagination")
+            return self._comment(value)
+        except PublicationError:
+            raise PublicationError("invalid write receipt", phase="publisher-write-receipt") from None
 
     def update_comment(self, comment_id, body):
         value, more = self._json("PATCH", f"/issues/comments/{_integer(comment_id)}", body=canonical({"body": body}))
-        if more:
-            raise PublicationError("unexpected write pagination")
-        result = self._comment(value)
-        if result.id != comment_id:
-            raise PublicationError("write comment identity mismatch")
-        return result
+        try:
+            if more:
+                raise PublicationError("unexpected write pagination")
+            result = self._comment(value)
+            if result.id != comment_id:
+                raise PublicationError("write comment identity mismatch")
+            return result
+        except PublicationError:
+            raise PublicationError("invalid write receipt", phase="publisher-write-receipt") from None
 
 
 class PublicationState(StrEnum):
@@ -403,5 +437,5 @@ def publish(report, adapter: GitHubPublisherAdapter, author: PublisherAuthor):
     result = (_phase("publisher-write-unavailable", adapter.update_comment, matching[0][0].id, report.body) if matching
               else _phase("publisher-write-unavailable", adapter.create_comment, i.pr_number, report.body))
     if result.author != author or result.body != report.body:
-        raise PublicationError("publisher write receipt mismatch", phase="publisher-write-unavailable")
+        raise PublicationError("publisher write receipt mismatch", phase="publisher-write-receipt")
     return PublicationResult(PublicationState.UPDATED if matching else PublicationState.CREATED, result.id)

@@ -364,9 +364,9 @@ Limits are trusted constants, never stage payload options:
 | Resource | Bound |
 | --- | --- |
 | Targets / inference calls / rounds per stage per target | 2 / 6 / 1 |
-| Active agent wall time, accumulated across run/resume | 600 seconds |
-| Each inference including formatting/tokenization | 150 seconds or remaining active budget |
-| Decision / edits / review completion tokens | 256 / 768 / 128 |
+| Active agent wall time, accumulated across run/resume | 1,000 seconds |
+| Each inference including formatting/tokenization | 300 seconds or remaining active budget |
+| Decision / edits / review completion tokens | 256 / 768 / 192 |
 | Decision / edits / review raw response | 4 / 16 / 2 KiB |
 | Canonical provider request / target projection | 24 / 16 KiB |
 | HTTP request or response / total HTTP calls | 128 KiB each / at most 18 |
@@ -924,7 +924,7 @@ absolute deadline with 10-second socket inactivity bounds. Setup is limited to
 420 seconds, each startup to 90 seconds, source checkout to 120 seconds and the
 host preparation to 2,640 seconds. Existing T03, T04 and T05 limits are unchanged:
 GitHub reads use 10-second requests and the existing request/byte budgets; T04
-allows six calls, 150 seconds per call and 600 active seconds overall; T05 limits
+allows six calls, 300 seconds per call and 1,000 active seconds overall; T05 limits
 image build to 600 seconds and each tool to 120 seconds.
 
 The loopback server uses port 8765, CPU only, four threads, context 8192, parallel
@@ -1000,3 +1000,65 @@ approved same-repository demo must exercise automatic triggering, actual Qwen
 edits, Docker verification, final artifact delivery and publication. A subsequent
 commit must automatically update the same sticky comment. Until this gate has
 actual evidence, final T07 acceptance remains incomplete.
+
+
+### T07-B3 local release boundaries
+
+The pinned native `/completion` endpoint supports `json_schema`. Its schema is
+host-owned, derived from the same trusted stage shapes used in the prompt, and
+digest-bound in the canonical provider request. The stage shape digest is part of
+the binding; the exact context binds candidate paths and complete evidence.
+Decision citations are constrained to available tests, and each target selects
+at most one intended test file. Existing files require update; missing files
+require generate. Host field, binding, evidence, path and T02 policy validation
+still run after generation. The model cannot select a schema, endpoint or tool.
+
+Real socket regressions cover framed close, keep-alive, chunked and EOF bodies.
+The provider checks `HTTPResponse.isclosed()` before touching the retained socket
+and rejects mismatched Content-Length. Native `truncated` concerns context;
+`stop_type=limit` separately rejects exhausted output. The 16 KiB projection,
+24 KiB host request, 8,192-token context and 256/768 decision/edit limits remain.
+Review completion is bounded to 192 tokens: the exact failed verifier feedback
+exhausted 128 tokens with native `stop_type=limit`; the new cap adds 64 tokens
+of measured headroom while retaining the 2 KiB response and 512-byte text gates.
+
+A measured exact PR #2 run used 6,495/4,727/4,389/3,160 prompt tokens and
+222/330/177/690 generated tokens for frontend decision/edit and backend
+decision/edit. All ended with EOS. Its longest call took 223.388 seconds and its
+four calls took 717.298 seconds. The fixed 300-second call deadline provides
+about 34% headroom; 1,000 active seconds reserves time for both verification
+reviews and normal variation. Absolute deadlines and the six-call/no-retry
+limits remain enforced. These measurements are local, not GitHub run results.
+
+Failed results export only the finite `Diagnostic` vocabulary in handoff reason,
+final metadata and reports. Exception strings and provider bodies are excluded.
+Historical v1 handoffs with null reason remain readable; the current producer
+always supplies an allowlisted code for a failed agent. Publication writes have
+fixed HTTP 401/403/404/422/5xx/other, transport, JSON, receipt and timeout
+categories. Valid 201 receipts succeed with either close or keep-alive framing.
+No publisher status or local simulation proves live GitHub authorization.
+
+The first complete rehearsal correctly rejected generated frontend TypeScript
+with TS1005 and TS1161. Edit projections now replace the named test subject's
+historical source with its complete captured current-head source. Subjects are
+derived from accepted adjacent test paths and captured T03 evidence only; no
+files are discovered, and no projection cap is enlarged. An incomplete existing
+test still cannot authorize an update. The trusted prompt also requires plain
+TypeScript in `.test.ts`, JSX only in `.test.tsx`, complete contents without code
+fences, and a valid filter assertion at its observable boundary. Compiler and
+Docker verification remain the authority for generated code.
+
+Native decision schemas also couple action and path: generation permits only
+missing captured candidates; update permits only complete available existing
+tests. Non-edit actions permit no intended paths, and no-tests-needed requires
+complete cited evidence. These are stricter renderings of existing host semantics,
+not new model authority. The native schema is hash-bound in ProviderRequest;
+the prompt retains the shared field shape, avoiding duplicate large path/schema
+text in the 24 KiB request. T02 and binding validation remain independent gates.
+
+The local release gate remains failed: the pinned Qwen runtime still produced a
+frontend `.test.ts` rejected with TS1005 and TS1161 after the current-source and
+syntax guidance changes. Both review completions succeeded within 192 tokens;
+handoff and local publication preserved VERIFICATION_FAILED. This is not a
+model qualification or a successful repeatability result. No model/runtime pin
+or GitHub state was changed.

@@ -14,12 +14,14 @@ from types import MappingProxyType
 from typing import Protocol
 
 from .contracts import Target
+from .diagnostics import Diagnostic, safe_diagnostic
+from .protocol import stage_schema
 
 
 MAX_REQUEST_BYTES = 24 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_HTTP_BYTES = 128 * 1024
-MAX_CALL_SECONDS = 150
+MAX_CALL_SECONDS = 300
 CONTEXT_TOKENS = 8192
 LLAMA_COMMIT = "d81235049384534c167caea52b85a694f6103d14"
 
@@ -44,13 +46,17 @@ class Stage(StrEnum):
 
 
 COMPLETION_TOKENS = MappingProxyType({Stage.DECISION: 256, Stage.EDITS: 768,
-                                     Stage.VERIFICATION: 128})
+                                     Stage.VERIFICATION: 192})
 RESPONSE_LIMITS = MappingProxyType({Stage.DECISION: 4096, Stage.EDITS: MAX_RESPONSE_BYTES,
                                   Stage.VERIFICATION: 2048})
 
 
 class ProviderError(ValueError):
     """Fixed rule messages only, never remote exception/response text."""
+
+    def __init__(self, message, *, diagnostic=Diagnostic.PROVIDER_HTTP):
+        super().__init__(message)
+        self.diagnostic = safe_diagnostic(diagnostic)
 
 
 def canonical(value) -> bytes:
@@ -80,7 +86,7 @@ def strict_json(raw: str, maximum: int):
         return json.loads(raw, object_pairs_hook=_unique,
                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (UnicodeError, ValueError, RecursionError):
-        raise ProviderError("invalid or oversized provider JSON") from None
+        raise ProviderError("invalid or oversized provider JSON", diagnostic=Diagnostic.PROVIDER_JSON) from None
 
 
 @dataclass(frozen=True)
@@ -103,7 +109,16 @@ class ProviderRequest:
     def to_bytes(self):
         return canonical({"stage": self.stage, "target": self.target, "binding": self.binding,
                           "system": self.system, "user": self.user,
+                          "response_schema_sha256": digest(canonical(self.response_schema)),
                           "completion_tokens": COMPLETION_TOKENS[self.stage]})
+
+    @property
+    def response_schema(self):
+        # No caller/model-supplied schema. A fresh shape also prevents mutation
+        # of a returned dict from changing subsequent requests.
+        value = strict_json(self.user, MAX_REQUEST_BYTES)
+        evidence = value.get("input") if type(value) is dict else None
+        return stage_schema(self.stage, self.target, self.binding, evidence, constrain_actions=True)
 
 
 class Provider(Protocol):
@@ -154,7 +169,7 @@ class LocalLlamaProvider:
     def _remaining(deadline):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ProviderError("provider deadline exhausted")
+            raise ProviderError("provider deadline exhausted", diagnostic=Diagnostic.PROVIDER_TIMEOUT)
         return min(remaining, MAX_CALL_SECONDS)
 
     def _post(self, endpoint, payload, deadline):
@@ -196,6 +211,10 @@ class LocalLlamaProvider:
                 raise ProviderError("local HTTP response byte limit")
             data = bytearray()
             while True:
+                # The final framed byte closes response.fp. For Connection:
+                # close this also closes the socket retained by the timer.
+                if response.isclosed():
+                    break
                 sock.settimeout(self._remaining(deadline))
                 chunk = response.read1(min(4096, MAX_HTTP_BYTES + 1 - len(data)))
                 if not chunk:
@@ -204,11 +223,17 @@ class LocalLlamaProvider:
                 if len(data) > MAX_HTTP_BYTES:
                     raise ProviderError("local HTTP response byte limit")
             self._remaining(deadline)
+            if length is not None and len(data) != int(length):
+                raise ProviderError("local HTTP response length mismatch")
             value = strict_json(data.decode("utf-8"), MAX_HTTP_BYTES)
             if type(value) is not dict:
                 raise ProviderError("local HTTP object required")
             return value
+        except ProviderError:
+            raise
         except (OSError, UnicodeError, http.client.HTTPException, ValueError, AttributeError):
+            if time.monotonic() >= deadline:
+                raise ProviderError("provider deadline exhausted", diagnostic=Diagnostic.PROVIDER_TIMEOUT) from None
             raise ProviderError("local HTTP unavailable or rejected") from None
         finally:
             if timer is not None:
@@ -224,22 +249,33 @@ class LocalLlamaProvider:
         ]}, deadline)
         prompt = applied.get("prompt")
         if type(prompt) is not str or len(prompt.encode()) > MAX_HTTP_BYTES:
-            raise ProviderError("rendered prompt rejected")
+            raise ProviderError("rendered prompt rejected", diagnostic=Diagnostic.PROVIDER_PROTOCOL)
         tokens = self._post("/tokenize", {"content": prompt, "add_special": True}, deadline).get("tokens")
         maximum = COMPLETION_TOKENS[request.stage]
-        if (type(tokens) is not list or not tokens or len(tokens) + maximum > CONTEXT_TOKENS
+        if (type(tokens) is not list or not tokens
                 or any(type(t) is not int or not 0 <= t < 2**31 for t in tokens)):
-            raise ProviderError("prompt token budget or format rejected")
+            raise ProviderError("prompt token budget or format rejected", diagnostic=Diagnostic.PROVIDER_PROTOCOL)
+        if len(tokens) + maximum > CONTEXT_TOKENS:
+            raise ProviderError("prompt token budget or format rejected", diagnostic=Diagnostic.PROVIDER_TOKEN_BUDGET)
         reply = self._post("/completion", {
             "prompt": tokens, "n_predict": maximum, "temperature": 0.0, "top_k": 1,
             "top_p": 1.0, "min_p": 0.0, "seed": 42, "repeat_penalty": 1.0,
             "cache_prompt": False, "stream": False,
+            "json_schema": request.response_schema,
         }, deadline)
         if reply.get("truncated") is not False:
-            raise ProviderError("completion truncation missing or true")
+            raise ProviderError("completion truncation missing or true", diagnostic=(
+                Diagnostic.PROVIDER_TRUNCATED if reply.get("truncated") is True else Diagnostic.PROVIDER_PROTOCOL))
         count = reply.get("tokens_predicted")
         if type(count) is not int or not 0 <= count <= maximum:
-            raise ProviderError("completion token evidence rejected")
+            raise ProviderError("completion token evidence rejected", diagnostic=Diagnostic.PROVIDER_PROTOCOL)
+        # The pinned native API's truncated flag describes prompt/context
+        # truncation. Output exhaustion is reported separately as stop_type.
+        stop = reply.get("stop_type")
+        if stop == "limit":
+            raise ProviderError("completion prediction budget exhausted", diagnostic=Diagnostic.PROVIDER_TRUNCATED)
+        if type(stop) is not str or stop not in {"eos", "word"}:
+            raise ProviderError("completion stop evidence rejected", diagnostic=Diagnostic.PROVIDER_PROTOCOL)
         raw = reply.get("content")
         strict_json(raw, RESPONSE_LIMITS[request.stage])
         return raw

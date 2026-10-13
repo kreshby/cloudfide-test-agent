@@ -18,6 +18,7 @@ from .reporting import (DeliveryState, MAX_ADVISORY_BYTES, MAX_COMMENT_BYTES, Pa
                         PublicationIdentity, ReportingError, _MEANINGS, _verification, bind_evidence,
                         inert_text, report_status)
 from .skills import REGISTRY
+from .diagnostics import EXPLANATIONS, safe_diagnostic
 from .verification import CommandEvidence, Counts, VerificationReport
 
 
@@ -38,6 +39,7 @@ REASONS = {
     "artifact-preparation-unavailable": "Required patch preparation was unavailable.",
     "report-unavailable": "A bound final report could not be prepared.",
 }
+DIAGNOSTIC_REASONS = EXPLANATIONS
 FACT_FIELDS = {"status", "reason", "context_sha256", "changes_sha256", "required_edits",
                "patch_prepared", "decisions", "recommendations", "skills", "edits", "verification"}
 TOP_FIELDS = {"schema_version", "identity", "source", "source_ci", "trusted_workflow_sha", "facts"}
@@ -97,7 +99,9 @@ def execution_facts(bundle, result, verification, publication, *, patch_prepared
             "commands": [{k: v for k, v in asdict(c).items() if k != "error"}
                          | {"has_error": c.error is not None} for c in verification.commands],
         }
-    return {"status": report_status(bound), "reason": None, "context_sha256": bundle.sha256,
+    return {"status": report_status(bound),
+            "reason": str(safe_diagnostic(result.diagnostic)) if result.state == "failed" else None,
+            "context_sha256": bundle.sha256,
             "changes_sha256": bound.changes_sha256,
             "required_edits": bool(result.proposal and result.proposal.edits),
             "patch_prepared": patch_prepared,
@@ -172,7 +176,8 @@ def validate(value):
         raise HandoffError("handoff source CI rejected")
     facts = fields(value["facts"], FACT_FIELDS)
     status, reason = facts["status"], facts["reason"]
-    if status not in _MEANINGS or (reason is not None and reason not in REASONS):
+    if status not in _MEANINGS or (reason is not None and (
+            type(reason) is not str or reason not in REASONS.keys() | DIAGNOSTIC_REASONS.keys())):
         raise HandoffError("handoff status rejected")
     for key in ("required_edits", "patch_prepared"):
         if type(facts[key]) is not bool:
@@ -220,11 +225,13 @@ def validate(value):
     if (facts["required_edits"] != bool(paths) or facts["patch_prepared"] and not paths
             or paths and facts["changes_sha256"] is None):
         raise HandoffError("edit flags conflict")
-    if reason is not None:
+    if reason is not None and facts["context_sha256"] is None:
         if facts != terminal_facts(status, reason):
             raise HandoffError("terminal report contains execution claims")
     elif facts["context_sha256"] is None:
         raise HandoffError("execution facts lack context binding")
+    elif reason is not None and (status != "AGENT_FAILED" or reason not in DIAGNOSTIC_REASONS):
+        raise HandoffError("execution diagnostic rejected")
     verification = None
     if facts["verification"] is not None:
         if not paths or facts["changes_sha256"] is None:
@@ -297,7 +304,8 @@ def report(value, *, artifact_id=None):
             inert_text(r, MAX_ADVISORY_BYTES) for r in f["recommendations"]))
     lines.extend(["", "### Host evidence (authoritative)"])
     if f["reason"]:
-        lines.append(REASONS[f["reason"]])
+        lines.append((f"Agent diagnostic: `{f['reason']}` — " + DIAGNOSTIC_REASONS[f["reason"]])
+                     if f["context_sha256"] is not None else REASONS[f["reason"]])
     lines.append(f"Source CI conclusion: {value['source_ci']['conclusion']}.")
     if verification is None:
         lines.append("Host verification: no execution evidence supplied.")

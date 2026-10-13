@@ -210,6 +210,8 @@ def build_bundle(bundle, result, repository_root, verification=None, *, publicat
                                       else DeliveryState.NOT_REQUIRED),
                 "required_edits": bool(result.proposal and result.proposal.edits),
                 "skills": [asdict(s) for s in bound.skills]}
+    from .diagnostics import safe_diagnostic
+    metadata["diagnostic"] = str(safe_diagnostic(result.diagnostic)) if result.state == "failed" else None
     data = {"verification.json": canonical(verification_metadata(bound)),
             "report-metadata.json": canonical(metadata)}
     if patch is not None:

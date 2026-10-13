@@ -105,8 +105,10 @@ def decisions_for(bundle, actions=None):
 
 
 def _binding(bundle, stage, target, payload):
+    from automation.test_agent.protocol import stage_shape
     return digest(canonical({'source': asdict(bundle.source), 'context_sha256': bundle.sha256,
-                             'stage': stage, 'target': target, 'input': payload}))
+                             'stage': stage, 'target': target, 'input': payload,
+                             'response_shape_sha256': digest(canonical(stage_shape(stage)))}))
 
 
 def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):

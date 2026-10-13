@@ -34,6 +34,8 @@ class Response:
         self.headers = headers or {}
     def getheader(self, key, default=None):
         return self.headers.get(key, default)
+    def isclosed(self):
+        return not self.raw
     def read1(self, maximum):
         chunk, self.raw = self.raw[:maximum], self.raw[maximum:]
         return chunk
@@ -45,7 +47,7 @@ def fake_http(monkeypatch, responses):
         def __init__(self, host, port, timeout):
             assert host == '127.0.0.1'
             assert 1024 <= port <= 65535
-            assert 0 < timeout <= 150
+            assert 0 < timeout <= module.MAX_CALL_SECONDS
             self.host, self.port = host, port
             self.sock = Socket()
             self.closed = False
@@ -67,7 +69,7 @@ def fake_http(monkeypatch, responses):
 def test_local_native_protocol_is_fixed_deterministic_and_bounded(monkeypatch, stage):
     raw = '{"result":"data"}'
     responses = [Response({'prompt': 'rendered prompt'}), Response({'tokens': [1, 2, 3]}),
-                 Response({'content': raw, 'truncated': False, 'tokens_predicted': 20})]
+                 Response({'content': raw, 'truncated': False, 'tokens_predicted': 20, 'stop_type': 'eos'})]
     connections = fake_http(monkeypatch, responses)
     monkeypatch.setenv('HTTP_PROXY', 'https://outside.invalid')
     monkeypatch.setenv('OPENAI_API_KEY', 'unused-test-value')
@@ -81,7 +83,8 @@ def test_local_native_protocol_is_fixed_deterministic_and_bounded(monkeypatch, s
     settings = connections[2].calls[0][2]
     assert settings == {'prompt': [1, 2, 3], 'n_predict': COMPLETION_TOKENS[stage],
                         'temperature': 0.0, 'top_k': 1, 'top_p': 1.0, 'min_p': 0.0,
-                        'seed': 42, 'repeat_penalty': 1.0, 'cache_prompt': False, 'stream': False}
+                        'seed': 42, 'repeat_penalty': 1.0, 'cache_prompt': False, 'stream': False,
+                        'json_schema': request(stage).response_schema}
     assert all('Authorization' not in c.calls[0][3] for c in connections)
     assert 'unused-test-value' not in repr([c.calls for c in connections])
 
@@ -113,13 +116,13 @@ def test_prompt_token_format_and_context_bound(monkeypatch, tokens):
 
 
 @pytest.mark.parametrize('reply', [
-    {'content': '{}', 'truncated': True, 'tokens_predicted': 5},
-    {'content': '{}', 'tokens_predicted': 5},
-    {'content': '{}', 'truncated': False},
-    {'content': '{}', 'truncated': False, 'tokens_predicted': 257},
-    {'content': '{}', 'truncated': False, 'tokens_predicted': True},
-    {'content': '{} trailing', 'truncated': False, 'tokens_predicted': 5},
-    {'content': 'x' * 4097, 'truncated': False, 'tokens_predicted': 5},
+    {'content': '{}', 'truncated': True, 'tokens_predicted': 5, 'stop_type': 'eos'},
+    {'content': '{}', 'tokens_predicted': 5, 'stop_type': 'eos'},
+    {'content': '{}', 'truncated': False, 'stop_type': 'eos'},
+    {'content': '{}', 'truncated': False, 'tokens_predicted': 257, 'stop_type': 'eos'},
+    {'content': '{}', 'truncated': False, 'tokens_predicted': True, 'stop_type': 'eos'},
+    {'content': '{} trailing', 'truncated': False, 'tokens_predicted': 5, 'stop_type': 'eos'},
+    {'content': 'x' * 4097, 'truncated': False, 'tokens_predicted': 5, 'stop_type': 'eos'},
 ])
 def test_completion_semantics_and_stage_output_budgets(monkeypatch, reply):
     connections = fake_http(monkeypatch, [Response({'prompt': 'p'}), Response({'tokens': [1]}), Response(reply)])
@@ -140,10 +143,18 @@ def test_adapter_interface_rejects_non_inference_operations(operation):
         LocalLlamaProvider().infer(operation, 10)
 
 
-@pytest.mark.parametrize('timeout', [True, 0, -1, 151, float('inf'), float('nan'), '10'])
+@pytest.mark.parametrize('timeout', [True, 0, -1, 301, float('inf'), float('nan'), '10'])
 def test_timeout_host_upper_bound(timeout):
     with pytest.raises(ProviderError, match='timeout'):
         LocalLlamaProvider().infer(request(), timeout)
+
+
+def test_exact_inference_deadline_upper_bound_is_accepted(monkeypatch):
+    connections = fake_http(monkeypatch, [Response({'prompt': 'p'}), Response({'tokens': [1]}),
+        Response({'content': '{}', 'truncated': False, 'tokens_predicted': 1, 'stop_type': 'eos'})])
+    assert LocalLlamaProvider().infer(request(), module.MAX_CALL_SECONDS) == '{}'
+    assert len(connections) == 3
+    assert all(0 < t <= module.MAX_CALL_SECONDS for c in connections for t in c.sock.timeouts)
 
 
 def test_deadline_is_shared_across_endpoints_and_socket_has_hard_stop(monkeypatch):

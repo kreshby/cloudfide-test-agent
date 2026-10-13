@@ -163,7 +163,7 @@ def test_live_request_token_gate_reserves_completion_and_rejects_overflow(tmp_pa
         if endpoint == "/tokenize":
             return {"tokens": [1] * (CONTEXT_TOKENS - COMPLETION_TOKENS[stage] + extra)}
         assert len(payload["prompt"]) + payload["n_predict"] <= CONTEXT_TOKENS
-        return {"content": "{}", "truncated": False, "tokens_predicted": 1}
+        return {"content": "{}", "truncated": False, "tokens_predicted": 1, "stop_type": "eos"}
     with patch.object(local, "_post", side_effect=post):
         if extra:
             with pytest.raises(ProviderError, match="prompt token budget"):
@@ -238,7 +238,9 @@ def test_failed_publication_has_fixed_phase_diagnostic_and_never_retries(tmp_pat
     with pytest.raises(w.WorkflowError) as caught:
         w.main("publish")
     expected = "write" if phase == "receipt" else phase
-    assert str(caught.value) == f"publisher-{expected}-unavailable"
+    category = {"write": "publisher-write-http-403", "receipt": "publisher-write-receipt"}.get(
+        phase, f"publisher-{expected}-unavailable")
+    assert str(caught.value) == category
     assert caught.value.__suppress_context__
     assert sum(m == "POST" for m, _, _ in http.operations) == int(phase in {"write", "receipt"})
 

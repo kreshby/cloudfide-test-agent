@@ -12,11 +12,13 @@ from .policy import MAX_EDITED_FILES, PolicyError, test_path
 from .provider import (COMPLETION_TOKENS, MAX_CALL_SECONDS, RESPONSE_LIMITS, Provider,
                        ProviderError, ProviderRequest, Stage, canonical, digest, strict_json)
 from .skills import SkillError, load_skill
+from .diagnostics import Diagnostic, safe_diagnostic
+from .protocol import MAX_INTENDED_TEST_FILES, stage_schema, stage_shape
 
 
 MAX_PROVIDER_CALLS = 6
 MAX_STAGE_ROUNDS = 1  # Per (stage, target); no retries or automatic repair.
-MAX_ACTIVE_SECONDS = 600
+MAX_ACTIVE_SECONDS = 1000
 MAX_PROJECTION_BYTES = 16 * 1024
 MAX_TRACE_EVENTS = 48
 MAX_TRACE_BYTES = 64 * 1024
@@ -32,11 +34,25 @@ Prohibited: execution, credentials, arbitrary network/filesystem/GitHub writes,
 weakening tests, and claiming verification without host evidence.
 No tools or commands are available. Return only the exact stage JSON object;
 no Markdown, extra fields, reasoning tags, or prose. Never change the binding.
+Select one smallest relevant test file per target for the bounded edit stage.
+For action generate, select a missing candidate (exists=false) and create it.
+For an existing candidate (exists=true), use action update and preserve its tests.
+Cite existing_test_evidence only when its state is available; clipped metadata
+does not establish existing coverage. Prefer the direct behavior-changing API
+boundary when one small test can cover the change.
+In edits use the intended subject's exact current head exports and signatures.
+Frontend .test.ts files require plain TypeScript without JSX; JSX requires
+.test.tsx. Return complete file contents without code fences. For filters assert
+a valid filter at the observable request or cache boundary.
 """
 
 
 class AgentError(ValueError):
     """Fixed host rule, never arbitrary model text."""
+
+    def __init__(self, message, *, diagnostic=Diagnostic.CONTRACT):
+        super().__init__(message)
+        self.diagnostic = safe_diagnostic(diagnostic)
 
 
 class State(StrEnum):
@@ -73,6 +89,7 @@ class AgentResult:
     trace: tuple[str, ...]  # Immutable canonical events, with no raw repository/model text.
     provider_calls: int
     failure: str | None
+    diagnostic: Diagnostic | None = None
 
     @property
     def outcome(self):
@@ -145,8 +162,33 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
     represented = {e.path for e in bundle.sources if e.path in patch_paths
                    and e.source_sha == bundle.source.head_sha and e.state == "available"
                    and e.content is not None and len(e.content.encode("utf-8")) <= 4096}
+    # A complete diff plus historical source is sufficient for comparison,
+    # but edit generation needs the exact current API of the named subject.
+    # Derive subjects only from accepted test paths and captured T03 sources;
+    # no filesystem discovery or larger projection allowance is introduced.
+    subjects = set()
+    if intended is not None:
+        paths = set()
+        originals = {e.path: e for e in bundle.existing_tests}
+        for path in intended:
+            original = originals.get(path)
+            if original is not None and (original.state != "available" or original.content is None
+                                         or len(original.content.encode("utf-8")) > 4096):
+                continue  # An incomplete original cannot authorize an edit.
+            name = path.rsplit("/", 1)[-1]
+            if target == Target.FRONTEND:
+                paths.add(path.replace(".test.", ".").replace(".spec.", "."))
+            elif name.startswith("test_"):
+                directory = path.rsplit("/", 1)[0].replace("backend/tests", "backend/app", 1)
+                paths.add(directory + "/" + name[5:])
+        subjects = {e.path for e in bundle.sources if _target_path(e.path, target)
+                    and e.path in paths and e.source_sha == bundle.source.head_sha
+                    and e.state == "available" and e.content is not None
+                    and len(e.content.encode("utf-8")) <= 4096}
     for file in changed:
-        if file["path"] in represented:
+        if file["path"] in subjects:
+            file["head_content_state"] = "available"
+        elif file["path"] in represented:
             file["head_content_state"] = "represented-by-complete-patch"
     test_evidence = [_evidence(e, 4096) for e in sorted(tests, key=lambda e: e.path)]
     contents = {}
@@ -160,8 +202,10 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
         "trust": "untrusted-repository-data",
         "changed_files": changed,
         "sources": [_evidence(e, 4096) for e in sorted(bundle.sources, key=lambda e: (e.path, e.source_sha))
-                    if _target_path(e.path, target) and not (
-                        e.path in represented and e.source_sha == bundle.source.head_sha)],
+                    if _target_path(e.path, target) and (
+                        e.path in subjects and e.source_sha == bundle.source.head_sha
+                        or e.path not in subjects and not (
+                            e.path in represented and e.source_sha == bundle.source.head_sha))],
         "existing_tests": test_evidence,
         "candidate_tests": [{"path": e.path, "exists": e.exists}
                             for e in sorted(bundle.candidate_tests, key=lambda e: e.path)
@@ -201,19 +245,13 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
 
 def _fields(value, names):
     if type(value) is not dict or set(value) != set(names):
-        raise AgentError("stage fields rejected; no tools or extra actions allowed")
-
-
-def _object_schema(properties):
-    """Prompt presentation only; existing stage parsing and T02 own validation."""
-    return {"type": "object", "properties": properties, "required": list(properties),
-            "additionalProperties": False}
+        raise AgentError("stage fields rejected; no tools or extra actions allowed", diagnostic=Diagnostic.SCHEMA)
 
 
 def _text(value, maximum=512):
     if (type(value) is not str or not value.strip() or len(value.encode("utf-8")) > maximum
             or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in value)):
-        raise AgentError("stage text limit or format")
+        raise AgentError("stage text limit or format", diagnostic=Diagnostic.SCHEMA)
     return value
 
 
@@ -244,6 +282,7 @@ class UnitTestAgent:
         self._feedback = None
         self._recommendations = []
         self._failure = None
+        self._diagnostic = None
         self._event("initial", source=asdict(bundle.source), context_sha256=self._context_digest,
                     definition_sha256=digest(UNIT_TEST_AGENT.encode()))
 
@@ -254,7 +293,7 @@ class UnitTestAgent:
     def result(self):
         return AgentResult(self._state, self._context_digest, self._proposal, self._policy,
                            self._feedback, tuple(self._recommendations), tuple(self._trace),
-                           self._calls, self._failure)
+                           self._calls, self._failure, self._diagnostic)
 
     def _event(self, event, **data):
         raw = canonical({"event": event, **data})
@@ -272,12 +311,13 @@ class UnitTestAgent:
         self._event("transition", previous=self._state, state=new)
         self._state = new
 
-    def _fail(self, reason):
+    def _fail(self, reason, diagnostic=Diagnostic.CONTRACT):
         previous = self._state
         self._state = State.FAILED
         self._failure = reason
+        self._diagnostic = safe_diagnostic(diagnostic)
         raw = canonical({"event": "transition", "previous": previous,
-                         "state": State.FAILED, "failure": reason})
+                         "state": State.FAILED, "failure": reason, "diagnostic": self._diagnostic})
         self._trace.append(raw.decode())
         self._trace_bytes += len(raw)
 
@@ -287,18 +327,18 @@ class UnitTestAgent:
             raise AgentError("active wall-time budget exhausted")
         return min(MAX_CALL_SECONDS, remaining)
 
-    def _ask(self, stage, target, payload, skill_ids, shape):
+    def _ask(self, stage, target, payload, skill_ids):
         if self._calls >= MAX_PROVIDER_CALLS:
             raise AgentError("provider call budget exhausted")
         if (stage, target) in self._rounds:
             raise AgentError("stage round budget exhausted")
         loaded = tuple(load_skill(identifier, target) for identifier in skill_ids)
         payload = {"source": asdict(self._bundle.source), "context_sha256": self._context_digest,
-                   "stage": stage, "target": target, "input": payload}
+                   "stage": stage, "target": target, "input": payload,
+                   "response_shape_sha256": digest(canonical(stage_shape(stage)))}
         binding = digest(canonical(payload))
         payload["binding"] = binding
-        response_schema = _object_schema({"binding": {"const": binding},
-                                          "target": {"const": str(target)}, **shape})
+        response_schema = stage_schema(stage, target, binding, payload["input"])
         system = UNIT_TEST_AGENT + "\n" + "\n".join(s.body for s in loaded) + (
             "\nResponse JSON schema (all fields required; no extra fields):\n" +
             canonical(response_schema).decode())
@@ -313,17 +353,19 @@ class UnitTestAgent:
         started = self._clock()
         try:
             raw = self._provider.infer(request, timeout)
+        except ProviderError as error:
+            raise AgentError("provider inference failed", diagnostic=safe_diagnostic(error.diagnostic)) from None
         except Exception:
-            raise AgentError("provider inference failed") from None
+            raise AgentError("provider inference failed", diagnostic=Diagnostic.PROVIDER_HTTP) from None
         if self._clock() - started > timeout:
-            raise AgentError("provider call timeout exceeded")
+            raise AgentError("provider call timeout exceeded", diagnostic=Diagnostic.PROVIDER_TIMEOUT)
         self._remaining()
         value = strict_json(raw, RESPONSE_LIMITS[stage])
         self._event("response", stage=stage, target=target, response_sha256=digest(raw.encode()),
                     response_bytes=len(raw.encode()))
         _fields(value, response_schema["required"])
         if value["binding"] != binding or value["target"] != str(target):
-            raise AgentError("stale stage binding or target")
+            raise AgentError("stale stage binding or target", diagnostic=Diagnostic.BINDING)
         return value
 
     def _projection(self, target, intended=None):
@@ -347,20 +389,14 @@ class UnitTestAgent:
                 target_skill = str(target) + "-unit-tests"
                 projection = self._projection(target)
                 response = self._ask(Stage.DECISION, target, projection,
-                                     ("analyze-change", target_skill), {
-                    "action": {"enum": ["generate", "update", "no-tests-needed", "unsupported"]},
-                    "changed_behavior": {"type": "string"},
-                    "existing_test_evidence": {"type": "array", "items": {"type": "string"}},
-                    "rationale": {"type": "string"},
-                    "intended_test_files": {"type": "array", "items": {"type": "string"}},
-                })
+                                     ("analyze-change", target_skill))
                 plan = TestPlan.from_mapping({k: response[k] for k in (
                     "changed_behavior", "existing_test_evidence", "rationale", "intended_test_files")}
                     | {"skill_ids": ["analyze-change", target_skill]})
                 _text(plan.changed_behavior)
                 _text(plan.rationale)
-                if len(plan.intended_test_files) > MAX_EDITED_FILES:
-                    raise AgentError("decision path count limit")
+                if len(plan.intended_test_files) > MAX_INTENDED_TEST_FILES:
+                    raise AgentError("decision path count limit", diagnostic=Diagnostic.PATH)
                 decision = TargetDecision.from_mapping({"target": str(target), "action": response["action"],
                                                         "plan": asdict(plan) | {
                     "existing_test_evidence": list(plan.existing_test_evidence),
@@ -368,36 +404,33 @@ class UnitTestAgent:
                 evidence = {e["path"]: e for e in projection["existing_tests"]}
                 if any(p not in evidence or evidence[p]["state"] != "available"
                        for p in plan.existing_test_evidence):
-                    raise AgentError("decision cites unavailable test evidence")
+                    raise AgentError("decision cites unavailable test evidence", diagnostic=Diagnostic.EVIDENCE)
                 if decision.action == ModelAction.NO_TESTS_NEEDED and not plan.existing_test_evidence:
-                    raise AgentError("no-tests-needed requires existing coverage evidence")
+                    raise AgentError("no-tests-needed requires existing coverage evidence", diagnostic=Diagnostic.EVIDENCE)
                 if decision.action in (ModelAction.NO_TESTS_NEEDED, ModelAction.UNSUPPORTED):
                     if plan.intended_test_files:
-                        raise AgentError("non-edit decision has intended edits")
+                        raise AgentError("non-edit decision has intended edits", diagnostic=Diagnostic.PATH)
                 else:
                     if not plan.intended_test_files:
-                        raise AgentError("edit decision requires intended paths")
+                        raise AgentError("edit decision requires intended paths", diagnostic=Diagnostic.PATH)
                     for path in plan.intended_test_files:
                         test_path(path, target)
                         if path not in self._context.permitted_test_paths:
-                            raise AgentError("intended path outside host context")
+                            raise AgentError("intended path outside host context", diagnostic=Diagnostic.PATH)
                     self._transition(State.GENERATING_EDITS)
                     edit_projection = self._projection(target, plan.intended_test_files)
                     originals = {e["path"]: e["content_sha256"] for e in edit_projection["existing_tests"]
                                  if e["state"] == "available" and e.get("content") is not None}
                     candidate_map = {c["path"]: c for c in edit_projection["candidate_tests"]}
                     if any(candidate_map[p]["exists"] and p not in originals for p in plan.intended_test_files):
-                        raise AgentError("update evidence unavailable or clipped")
+                        raise AgentError("update evidence unavailable or clipped", diagnostic=Diagnostic.EVIDENCE)
                     edit_response = self._ask(Stage.EDITS, target, {
                         "decision": asdict(decision), "evidence": edit_projection,
                         "permitted_test_paths": list(plan.intended_test_files), "original_sha256": originals,
-                    }, (target_skill,), {"edits": {"type": "array", "items": _object_schema({
-                        "path": {"type": "string"}, "operation": {"enum": ["create", "update"]},
-                        "original_sha256": {"type": ["string", "null"]}, "content": {"type": "string"},
-                    })}})
+                    }, (target_skill,))
                     if (type(edit_response["edits"]) is not list
                             or not 1 <= len(edit_response["edits"]) <= MAX_EDITED_FILES):
-                        raise AgentError("edit stage count limit")
+                        raise AgentError("edit stage count limit", diagnostic=Diagnostic.SCHEMA)
                     for item in edit_response["edits"]:
                         _fields(item, ("path", "operation", "original_sha256", "content"))
                         edits.append(ProposedEdit.from_mapping({**item, "target": str(target)}))
@@ -409,12 +442,15 @@ class UnitTestAgent:
             self._event("policy", decision=self._policy.decision, reason=self._policy.reason,
                         proposal_sha256=digest(canonical(asdict(self._proposal))))
             if self._policy.decision != PolicyDecision.ACCEPTED:
-                raise AgentError("T02 proposal policy rejected")
+                raise AgentError("T02 proposal policy rejected", diagnostic=Diagnostic.POLICY)
             self._remaining()
             self._transition(State.PROPOSAL_READY)
             self._transition(State.AWAITING_VERIFICATION if edits else State.FINISHED)
         except (AgentError, ContractError, ProviderError, SkillError, PolicyError) as error:
-            self._fail(str(error))
+            category = (Diagnostic.SCHEMA if isinstance(error, ContractError) else
+                        Diagnostic.PATH if isinstance(error, PolicyError) else
+                        safe_diagnostic(getattr(error, "diagnostic", None)))
+            self._fail(str(error), category)
         except UnicodeError:
             self._fail("invalid stage encoding")
         finally:
@@ -428,9 +464,9 @@ class UnitTestAgent:
         self._deadline = started + MAX_ACTIVE_SECONDS - self._active_seconds
         try:
             if type(feedback) is not HostResult or feedback.source != self._bundle.source:
-                raise AgentError("trusted verification source mismatch")
+                raise AgentError("trusted verification source mismatch", diagnostic=Diagnostic.VERIFIER)
             if len(feedback.verifier_results) > MAX_FEEDBACK_RECORDS:
-                raise AgentError("verification feedback record limit")
+                raise AgentError("verification feedback record limit", diagnostic=Diagnostic.VERIFIER)
             # Reconstruct to validate even a host object whose fields were tampered with.
             for record in feedback.verifier_results:
                 record.__post_init__()
@@ -449,9 +485,7 @@ class UnitTestAgent:
                 } for r in feedback.verifier_results]}
                 response = self._ask(Stage.VERIFICATION, target, {
                     "proposal_sha256": digest(canonical(asdict(self._proposal))), "verification": summary,
-                }, ("verify-test-patch",), {
-                    "recommendation": {"enum": ["accept", "reject", "unavailable"]},
-                    "interpretation": {"type": "string"}})
+                }, ("verify-test-patch",))
                 if response["recommendation"] not in ("accept", "reject", "unavailable"):
                     raise AgentError("unsupported verification recommendation")
                 _text(response["interpretation"], 512)
@@ -459,7 +493,7 @@ class UnitTestAgent:
             self._remaining()
             self._transition(State.FINISHED)
         except (AgentError, ContractError, ProviderError, SkillError, PolicyError) as error:
-            self._fail(str(error))
+            self._fail(str(error), safe_diagnostic(getattr(error, "diagnostic", None)))
         except UnicodeError:
             self._fail("invalid stage encoding")
         finally:

@@ -16,12 +16,13 @@ from .agent import State, UnitTestAgent
 from .artifacts import PatchPreparationState, build_bundle, validate_entries
 from .context import _compare, _source, _test, collect_context
 from .contracts import PolicyDecision, SourceIdentity
+from .diagnostics import Diagnostic
 from .github import CollectionError, GitHubHTTPTransport, GitHubReader, integer, object_value, repository, sha
 from .handoff import (FILE_NAME, MAX_HANDOFF_BYTES, decode, encode, execution_facts,
                       report, successful, terminal_facts)
 from .provider import digest, strict_json
 from .publisher import (GitHubPublisherAdapter, GitHubPublisherHTTPTransport, PublicationState,
-                        PublicationError, PublisherAuthor, publish)
+                        PublicationError, PublisherAuthor, WRITE_PHASES, publish)
 from .reporting import AgentRun, PublicationIdentity, bind_evidence
 from .runtime import LocalRuntime, Process, RuntimeUnavailable
 from .verification import Executor, GIT, Verifier, checked, safe_read
@@ -294,7 +295,8 @@ def execute(pre, reader, *, source_factory=SourceCheckout, runtime_factory=Local
                                 runtime.start()
                                 result = agent.resume(verification.host_result)
                             except Exception:
-                                result = replace(result, state=State.FAILED, failure="verification feedback unavailable")
+                                result = replace(result, state=State.FAILED, failure="verification feedback unavailable",
+                                                 diagnostic=Diagnostic.VERIFIER)
                     elif result.state == State.FAILED and result.policy is not None and result.policy.decision == PolicyDecision.REJECTED:
                         return terminal_facts("AGENT_FAILED", "policy-rejected"), None
             except Exception:
@@ -410,7 +412,7 @@ def _main(operation):
 
 PUBLISHER_FAILURES = frozenset({"publisher-preflight-unavailable", "publisher-handoff-unavailable",
                                "publisher-report-unavailable", "publisher-read-unavailable",
-                               "publisher-write-unavailable"})
+                               "publisher-write-unavailable"}) | WRITE_PHASES
 
 
 def main(operation):
@@ -423,7 +425,7 @@ def main(operation):
         # expose response bodies, arbitrary exception text, tokens, or paths.
         category = (error.phase if type(error) is PublicationError else
                     str(error) if type(error) is WorkflowError else None)
-        raise WorkflowError(category if category in PUBLISHER_FAILURES else
+        raise WorkflowError(category if type(category) is str and category in PUBLISHER_FAILURES else
                             "publisher-preflight-unavailable") from None
 
 

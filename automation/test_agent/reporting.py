@@ -525,6 +525,10 @@ def prepare_report(bundle, result, verification=None, *, delivery=None, publicat
                 raise ReportingError("invalid advisory recommendations")
             lines.append("Review recommendations (advisory): " + ", ".join(inert_text(r) for r in result.recommendations))
     lines.extend(["", "### Host evidence (authoritative)", "Actual loaded skills:", ""])
+    if result.state == State.FAILED:
+        from .diagnostics import EXPLANATIONS, safe_diagnostic
+        code = safe_diagnostic(result.diagnostic)
+        lines.append(f"Agent diagnostic: `{code}` — {EXPLANATIONS[code]}")
     if not bound.skills:
         lines.append("- No actual skill loads recorded.")
     for s in bound.skills:

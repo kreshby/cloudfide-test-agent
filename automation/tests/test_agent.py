@@ -368,13 +368,13 @@ def test_wall_and_per_call_time_budgets(tmp_path):
     original = provider.infer
     def late(request, timeout):
         response = original(request, timeout)
-        assert timeout <= 150
-        clock.now += 151
+        assert timeout <= module.MAX_CALL_SECONDS
+        clock.now += module.MAX_CALL_SECONDS + 1
         return response
     provider.infer = late
     assert agent.run().failure == 'provider call timeout exceeded'
     _, provider, agent = make_agent(tmp_path, clock=clock)
-    agent._active_seconds = 600
+    agent._active_seconds = module.MAX_ACTIVE_SECONDS
     assert agent.run().failure == 'active wall-time budget exhausted'
     assert provider.requests == []
 
@@ -390,7 +390,7 @@ def test_host_wait_excluded_but_active_budget_preserved_on_resume(tmp_path):
     _, _, agent = make_agent(tmp_path, feedback=feedback, clock=clock)
     agent.run()
     clock.now += 86400
-    agent._active_seconds = 600
+    agent._active_seconds = module.MAX_ACTIVE_SECONDS
     assert agent.resume(feedback).failure == 'active wall-time budget exhausted'
 
 
@@ -602,9 +602,9 @@ def test_loaded_registry_path_traversal_fails_even_if_host_entry_is_corrupt(monk
 def test_agent_budget_constants_and_no_executable_capabilities():
     assert module.MAX_PROVIDER_CALLS == 6
     assert module.MAX_STAGE_ROUNDS == 1
-    assert module.MAX_ACTIVE_SECONDS == 600
-    assert module.MAX_CALL_SECONDS == 150
-    assert module.COMPLETION_TOKENS == {Stage.DECISION: 256, Stage.EDITS: 768, Stage.VERIFICATION: 128}
+    assert module.MAX_ACTIVE_SECONDS == 1000
+    assert module.MAX_CALL_SECONDS == 300
+    assert module.COMPLETION_TOKENS == {Stage.DECISION: 256, Stage.EDITS: 768, Stage.VERIFICATION: 192}
     root = Path(module.__file__).parent
     forbidden_imports = {'subprocess', 'importlib', 'pickle', 'shutil'}
     forbidden_calls = {'eval', 'exec', 'compile', '__import__', 'system', 'popen', 'write_text', 'write_bytes'}
