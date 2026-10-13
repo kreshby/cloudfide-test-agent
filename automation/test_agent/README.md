@@ -1,9 +1,11 @@
-# Trusted test-agent boundaries (T02 and T03)
+# Trusted test-agent boundaries (T02, T03, and T04)
 
 This package uses only the Python standard library. It parses model proposals,
 checks trusted context and test-edit policy, and constructs immutable changes.
 T02 does not write edits, execute commands/tests, load skills, contact providers,
-or publish results. T03 adds bounded GitHub reads and context collection. Run
+or publish results. T03 adds bounded GitHub reads and context collection. T04
+adds advisory staged inference, authenticated skills, and a verification handshake.
+It still has no writer, test executor, runtime bootstrap, or production workflow. Run
 the automation tests from the root:
 
 ```sh
@@ -66,7 +68,7 @@ creates; `update` requires at least one update for that target and may contain
 supplemental creates. `no-tests-needed`
 and `unsupported` have no edits. Intended files must match each target's edits.
 Plans are model claims. Empty skill IDs are valid; no skill use is fabricated.
-`SkillUseRecord` is a separate future host record of actual skill loading with
+`SkillUseRecord` is a separate host record of actual skill loading with
 ID, version, content hash, loaded-content hash, target and schema version.
 
 `VerifierResult` and `HostResult` are host-only contracts. Verification records
@@ -225,3 +227,226 @@ Collection never reads the local checkout, imports PR code, runs application
 tests, evaluates text, follows source-selected URLs or changes any files.
 Reference/coverage inference, broader layouts, provider/runtime selection,
 verification, CI integration and publication remain future tasks.
+
+## T04 advisory UnitTestAgent
+
+`agent.UnitTestAgent(bundle, repository_root, provider)` consumes a trusted T03
+`ContextBundle` and a host-prepared exact-head checkout. `run()` returns an
+immutable `AgentResult`; it does not install its proposed tests. The immutable
+`UNIT_TEST_AGENT` definition describes its role, advisory authority, host
+authority, and prohibitions. No definition comes from analyzed repository text.
+T02 contracts and policy and T03 collection remain unchanged.
+
+P01's completed CPU experiments selected Qwen2.5-Coder while showing that a
+monolithic complete-proposal request exceeds useful bounded CPU inference.
+T04 therefore requests a compact **decision separately for each represented
+target**, followed by **edits only for generate/update**. The host translates
+strict stage JSON into `TargetDecision`/`ProposedEdit`, assembles `ModelProposal`,
+and calls the existing public `assess_proposal`. No model emits a complete T02
+proposal or selects source identities, permissions, skills, or provider settings.
+
+The explicit state transitions are:
+
+```text
+INITIAL -> DECIDING -> [GENERATING_EDITS -> DECIDING for another target]
+                   -> PROPOSAL_READY -> FINISHED (no edits)
+                                     -> AWAITING_VERIFICATION (edits)
+AWAITING_VERIFICATION -> REVIEWING_VERIFICATION -> FINISHED
+Any active phase -> FAILED on a contract, policy, or budget rejection
+```
+
+The bracketed branch is optional; a final edit stage goes directly to
+PROPOSAL_READY. FINISHED means the reasoning lifecycle is complete. The separate
+`outcome` is `no-tests-needed`, `unsupported`, or the exact host verdict after
+verification; FINISHED alone never means verified. Any accepted edited proposal
+must return `proposal-awaiting-verification` first. Re-running an instance,
+resuming a terminal result, or skipping the handshake is rejected.
+
+### Stage contracts and bounded projections
+
+Every stage returns exactly `binding`, `target`, and these fields:
+
+| Stage | Additional response fields |
+| --- | --- |
+| Decision | `action`, `changed_behavior`, `existing_test_evidence`, `rationale`, `intended_test_files` |
+| Edits | `edits`: objects with `path`, `operation`, `original_sha256`, `content` |
+| Verification review | `recommendation` (`accept`, `reject`, `unavailable`), `interpretation` |
+
+Decision responses contain no test code. Evidence citations must name available,
+unclipped existing tests in that target's projection; no-tests-needed requires a
+citation. This validates evidence provenance, not the model's coverage judgment.
+Non-edit decisions have zero intended paths. Intended edit paths must be T03
+candidates within T02's test families. Edit generation receives the accepted
+decision, intended paths, bounded evidence and full-original content SHA-256
+for readable existing tests; proposed updates still undergo T02's filesystem
+and original-hash checks. All existing edit-count, byte, path, source, and
+anti-weakening checks remain authoritative.
+
+`project_context` sorts evidence deterministically and selects only the current
+stack's changed metadata, source/hunk evidence, related tests, candidates,
+configuration and fixtures. Root pytest configuration belongs only to backend.
+Edits further restrict tests/candidates to intended paths. Source/test bodies
+are at most 4 KiB each; patches/configuration/fixtures at most 2 KiB each.
+Clipping is explicit, with content digests for evidence bodies. A clipped test
+cannot supply a decision citation or an update original. Total projection
+overflow fails rather than silently discarding evidence. No source imports,
+arbitrary local files, README/AGENTS instructions or URLs are followed.
+
+Each request includes the exact host source identity and complete T03 bundle
+digest. The host hashes canonical source/context/stage/target/input bytes into
+the binding. Edit bindings also include the accepted decision; review bindings
+include the proposal digest and verification summary. The model must echo the
+expected binding and target. Unknown fields, tools, duplicate keys, non-finite
+numbers, fences, surrounding prose and stale bindings fail. There is no JSON
+repair, coercion, or grammar enforcement in this version.
+
+### Fixed trusted skills
+
+`skills.REGISTRY` is immutable host configuration. Each entry fixes the ID,
+version, repository-relative path, SHA-256 and target applicability. The four
+version `1.0.0` files under `automation/test_agent/trusted_skills/` are:
+
+| Skill | Applicability | SHA-256 |
+| --- | --- | --- |
+| analyze-change | both targets | `fb879bcaa02da848e53b7f2ed0b586e122b7759de574bccf79abb38c1b02d284` |
+| frontend-unit-tests | frontend | `7d9fa26070d887afaf8f9cece72e197754d3283cb550e732b1251fa67b425952` |
+| backend-unit-tests | backend | `3ed8aa01cc9120212cc1a920fadf9fa29b66e1d855c392513652b523fcdacad8` |
+| verify-test-patch | both targets | `92ebfefbb247366f4aad15336f712fc2dd152d129e823ef1f1dc14d0ee26ff96` |
+
+Loading uses T02's descriptor-relative no-follow inspection. Missing files,
+symlinks including ancestors, hardlinks, directories/special files, unsafe modes,
+unknown IDs, traversal, oversized bodies and hash mismatches fail closed.
+Only the fixed trusted installation root is used. No PR, environment variable,
+directory discovery, URL or model output registers skills. Decision requests
+insert analyze-change plus the target skill; edit requests insert the target
+skill; review requests insert verify-test-patch. Each inserted body produces an
+actual T02 `SkillUseRecord` with matching expected and loaded hashes. FakeProvider
+tests compare exact loaded bodies and records with captured requests.
+
+### Provider boundary and selected pin
+
+`provider.Provider.infer(ProviderRequest, timeout)` is independent of llama.cpp.
+`FakeProvider` consumes finite raw transcripts and captures immutable requests.
+`LocalLlamaProvider` accepts only a host-owned integer port (1024–65535; default
+8765) at **127.0.0.1**. It exposes no URL, API key, credentials, external host,
+paid fallback, redirect, proxy, model download or process startup option.
+
+The selected runtime pin is:
+
+```text
+id: qwen25-coder-7b-q4km
+repository: Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
+revision: 13fb94bfda8c8cf22497dc57b78f391a9acb426a
+filename: qwen2.5-coder-7b-instruct-q4_k_m.gguf
+bytes: 4683073536
+sha256: 509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c
+llama.cpp: d81235049384534c167caea52b85a694f6103d14
+```
+
+Each inference uses the pinned server's native
+[`/apply-template`, `/tokenize`, `/completion` endpoints](https://github.com/ggml-org/llama.cpp/blob/d81235049384534c167caea52b85a694f6103d14/tools/server/README.md).
+All three share one absolute deadline. Socket inactivity timeouts plus a deadline
+timer closing the socket bound slow response headers/bodies. Status codes other
+than 200, unsupported encodings, oversized responses, malformed token metadata,
+context overflow and truncation fail. Sampling is fixed: seed 42, temperature 0,
+top-k 1, top-p 1, min-p 0, repeat penalty 1, no stream and no prompt cache.
+The adapter requires bounded completion-token evidence from the pinned server's
+[`tokens_predicted` response field](https://github.com/ggml-org/llama.cpp/blob/d81235049384534c167caea52b85a694f6103d14/tools/server/server-task.cpp).
+It cannot attest which
+model a loopback server loaded; T07 must start and verify the pinned runtime.
+No real model inference or adapter/server integration has been demonstrated here.
+
+### Limits and trace
+
+Limits are trusted constants, never stage payload options:
+
+| Resource | Bound |
+| --- | --- |
+| Targets / inference calls / rounds per stage per target | 2 / 6 / 1 |
+| Active agent wall time, accumulated across run/resume | 600 seconds |
+| Each inference including formatting/tokenization | 150 seconds or remaining active budget |
+| Decision / edits / review completion tokens | 256 / 768 / 128 |
+| Decision / edits / review raw response | 4 / 16 / 2 KiB |
+| Canonical provider request / target projection | 24 / 16 KiB |
+| HTTP request or response / total HTTP calls | 128 KiB each / at most 18 |
+| Tokenized prompt plus completion | 8,192 tokens |
+| Each trusted skill body | 2 KiB |
+| Trace events / trace bytes | 48 / 64 KiB |
+| Trusted verification records | 8 |
+
+These are ceilings, not performance measurements. P01's CPU evidence motivates
+smaller decision/review completions and separate targets; 768-token edits may
+still time out and are not retried. Human/verifier wait time is excluded from
+the active agent budget, which is preserved when resuming the same instance.
+The concrete local adapter enforces deadlines during HTTP; arbitrary injected
+providers are trusted host capabilities and must honor the timeout contract.
+The agent also rejects late returns. No provider/clock injection comes from data.
+
+The immutable canonical trace records exact source/context digest, definition
+digest, state transitions, projection digest/bytes, stage/target/binding,
+request/system/response digests and bytes, inserted skill records, T02 assessment,
+feedback receipt digest/host status and final state. It omits raw prompts,
+responses, generated code, interpretations, logs, credentials, environment and
+absolute checkout paths. Two event slots and 1 KiB are reserved for terminal
+failure. Trace request digests link skill records to exact captured requests;
+the trace alone is not an independent archive of those request bodies.
+
+### Trusted verification handshake and CLI
+
+`resume(HostResult)` is valid only on AWAITING_VERIFICATION. It requires exact
+source equality, bounded existing `VerifierResult` records, and their unchanged
+T02 contract validation. VERIFIED requires successful baseline and patched
+execution evidence. The review stage sees concise actual result/count/exit-code
+fields and no report logs. Its recommendation cannot replace the host status.
+Failed, not-run, baseline-failed, unavailable or stale evidence never becomes
+verified. A malformed review fails the agent even when host evidence exists.
+There is no automatic repair. T05 must produce real trustworthy evidence tied
+to the exact proposal and target profiles; Python host types are not evidence
+authentication or a sandbox against a malicious trusted caller.
+
+The CLI uses explicit provider selection and stdout only:
+
+```sh
+backend/.venv/bin/python -m automation.test_agent \
+  --context /trusted/context.json --context-sha256 <collector-digest> \
+  --repository-root /trusted/exact-head-checkout \
+  --provider fake --transcript /trusted/stage-responses.json
+```
+
+Fake transcripts are JSON arrays of raw, already-bound response strings, at most
+six entries; no placeholders or substitution occur at runtime. Local mode uses
+`--provider local` and optional `--port`; it assumes a separately verified
+server already exists. Mixing local mode with transcripts or fake mode with
+ports is rejected. Input paths are explicitly supplied by the trusted caller;
+bounded regular-file reads never execute their content. A host-pinned digest
+and canonical T03 serialization are required for context loading. The digest
+must arrive from trusted collection, never from the same untrusted PR/model
+artifact. The CLI does not collect GitHub data or validate checkout identity.
+
+`--resume-stdin` emits and flushes the awaiting proposal, then consumes one
+bounded trusted JSON feedback line in the same process. That line has exactly
+`proposal_sha256` and `host_result` (the serialized T02 host contract). The
+proposal digest must match the emitted proposal. It then emits the resumed
+result. Without this option the process exits with the awaiting draft. Exit 0
+means a valid draft or completed reasoning lifecycle, not verified tests; exit 1
+means rejection; invalid CLI options use argparse's exit 2. T07 should inspect
+`state`/`outcome`. HostResult JSON is accepted only on this host input channel,
+never from provider output. There is no unauthenticated persistent checkpoint.
+
+Focused deterministic checks:
+
+```sh
+backend/.venv/bin/python -m pytest automation/tests/test_agent.py automation/tests/test_provider.py -q
+backend/.venv/bin/python -m pytest automation/tests -q
+backend/.venv/bin/python -m compileall -q automation
+git diff --check
+```
+
+Tests inspect substantive Vitest/RTL and pytest/FastAPI fixture code as data.
+They cover generation, exact-hash updates, covered/unsupported/mixed targets,
+skills, state transitions, binding, forbidden tools, malformed/oversized output,
+T02 rejection, budgets, CLI handshake and host verdict authority. HTTP is mocked;
+no generated test, model, network request or application suite runs in these
+tests. Live output reliability/latency, test correctness, compilation and coverage
+are unmeasured. T05 verification and T07 trusted runtime/CI integration remain
+unimplemented; production workflows and GitHub publication are unchanged.
