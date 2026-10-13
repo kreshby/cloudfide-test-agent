@@ -1,4 +1,4 @@
-# Trusted test-agent boundaries (T02 through T05)
+# Trusted test-agent boundaries (T02 through T06)
 
 This package uses only the Python standard library. It parses model proposals,
 checks trusted context and test-edit policy, and constructs immutable changes.
@@ -687,6 +687,147 @@ Daemon failure can prevent confirmed removal; that is explicitly unavailable,
 never a verified result. Report tampering, shared-kernel isolation and Linux/Docker
 portability are residual limits, not hidden success claims.
 
-T06 reporting/publication and T07 provider/runtime/CI orchestration remain pending.
+T06 consumes this evidence without changing verifier verdicts; its boundaries
+are described below. T07 provider/runtime/CI orchestration remains pending.
 No production workflow, ordinary CI edit, application edit, provider invocation,
 model download, hosted service activation or GitHub write belongs to T05.
+
+## T06 reports, publication adapter and artifact preparation
+
+`reporting.prepare_report(bundle, agent_result, verification_report)` validates
+the host-owned T03/T04/T02/T05 chain before rendering. The context digest and
+complete source identities must agree, including the policy SHA. Accepted
+changes must exactly match proposal edits and context path inventories; verifier
+commands and results must bind to the head and SHA-256 of those exact canonical
+changes. An agent feedback result must equal the verifier's host result.
+Workflow metadata supplies numeric run/attempt/repository identities; it must
+agree with the source head and run ID. Arbitrary execution dictionaries and
+model-produced reporting objects are rejected. Caller-supplied Python objects
+are trusted capabilities, not an authentication mechanism for uploaded JSON.
+
+The comment separates **Agent analysis (advisory)** from **Host evidence
+(authoritative)**. Behavior, rationale, target decisions and review suggestions
+remain advisory. Only typed verifier evidence supplies execution status, fixed
+profile IDs, baseline/patched outcomes, collected/passed/failed/error/skipped
+counts, exit codes, timeouts and bounded relative report references/digests.
+Typecheck has no test count. Raw logs, model responses, build output, arbitrary
+error text and absolute host report handles are omitted.
+
+| Final report status | Meaning |
+| --- | --- |
+| VERIFIED | The supplied host verdict observed successful required checks |
+| VERIFICATION_FAILED | Patched verification or its evidence failed |
+| BASELINE_FAILED | A required baseline guard failed |
+| UNAVAILABLE | Verification is unavailable, including an awaiting proposal without evidence |
+| STALE | Captured source or edits are stale |
+| UNSUPPORTED | Analysis or verification is unsupported |
+| NO_TESTS_NEEDED | Advisory decision without invented execution evidence |
+| AGENT_FAILED | Agent lifecycle failed; any supplied host verdict is still shown separately |
+
+Actual loaded skills come exclusively from canonical T04 request events. The
+extractor checks the initial source/context/definition binding, exact request
+fields, stage/target uniqueness, request budgets, every SkillUseRecord field,
+schema and the fixed registry's version, target and expected/loaded hashes.
+It deduplicates by target and skill ID, in sorted order. Plan `skill_ids` confer
+no load evidence. Malformed or contradictory trace records fail closed; traces
+are host-owned records, not independent cryptographic attestations of requests.
+
+Untrusted display text encodes Markdown/HTML punctuation as visible entities
+and replaces ASCII `@` with fullwidth `＠`, preventing user/team mentions.
+Controls, ANSI escapes, surrogate and directional formatting characters are
+rejected. Model text cannot insert links, headings, tables, fences or hidden
+comments. Each advisory field has a 2 KiB UTF-8 display budget, with deterministic
+clipping explicitly marked. The complete comment must fit **48 KiB** or rendering
+fails with a fixed error. Run links are built from validated repository/run IDs;
+patch links require a trusted numeric artifact receipt for that same run.
+
+### Sticky publisher and future permission boundary
+
+`publisher.publish(prepared_report, adapter, expected_author)` uses one exact
+first-line hidden marker, `taskly-unit-test-agent-report:v1`. Its strict grammar
+encodes repository/PR, head/policy/base/merge-base SHAs, repository ID, workflow
+run and attempt. Only comments matching the expected numeric author ID, exact
+login and account type participate. A copied marker from another author is
+ignored. Zero owned comments creates one; one updates the same ID; duplicate
+or malformed owned markers fail closed. No comments are deleted.
+
+The adapter reads the PR before discovery and immediately before POST/PATCH.
+It requires the same open PR, repository and numeric ID, head and base SHA.
+Missing/closed/changed PRs return stale without a write. Validated numeric
+`(workflow_run_id, run_attempt)` order prevents older publications from replacing
+newer ones. Equal order requires identical identity and body for idempotence;
+conflicting facts fail closed. Visible text never selects identity or order.
+
+The concrete HTTP transport uses only `api.github.com` and its configured
+repository, with explicit injected authentication, no redirects, proxies,
+credential discovery, generic endpoints, GraphQL or shell. Only PR GET,
+paginated issue-comments GET, issue-comment POST and known-comment PATCH are
+available. Request bodies are at most 128 KiB; responses at most 1 MiB each and
+4 MiB total per adapter. A publication allows seven requests, four pages of 30
+comments, and 100 comments total. HTTP socket inactivity and absolute request
+deadline are ten seconds. Exceptions suppress remote/token-bearing details.
+All write tests use a deterministic fake; concrete HTTP tests replace connections.
+
+T07 must serialize publisher operations per PR: GitHub issue comments have no
+atomic compare-and-swap with PR metadata or comment ordering. The two reads
+reduce races but cannot remove the final read/write gap. Writes with lost
+responses are indeterminate and are not retried here; subsequent discovery is
+required. Pagination exhaustion also fails instead of guessing ownership.
+
+Only the future dedicated publisher job may receive `issues: write`. Context,
+inference, patch generation, verification and artifact preparation keep read-only
+or absent write credentials. Neither the model, generated tests nor Docker may
+receive the publisher token. No permission change or production workflow is
+installed by this package.
+
+### Deterministic artifact data and delivery
+
+`artifacts.build_bundle(bundle, agent_result, repository_root, verification_report)`
+produces bounded bytes and an explicit upload specification, without writing,
+applying, executing or uploading a patch. CREATE uses `/dev/null` to `b/path`;
+UPDATE uses `a/path` to `b/path`. Sorted accepted T02 edits and host `difflib`
+generate unified UTF-8 diffs, including missing-newline records. No model patch
+text is accepted. UPDATE requires available exact-head T03 original bytes with
+the authenticated Git blob identity, followed by a no-follow regular single-link
+local read matching original SHA-256, content and T02 mode. Unsafe/missing
+originals, symlink ancestors, hardlinks and special files make patch preparation
+unavailable. CREATE requires a safely missing target. Sensitive and bulk paths
+are excluded in addition to T02's test-path restrictions.
+
+Only these fixed host-created entries are allowed; there are no directories,
+recursive uploads, globs, dependencies, caches, images, model files or raw
+provider transcripts:
+
+| Entry | Maximum | Classification |
+| --- | --- | --- |
+| manifest.json | 16 KiB | manifest |
+| verification.json | 128 KiB | host-verification |
+| generated-tests.patch | 1 MiB | untrusted-test-patch-data |
+| report-metadata.json | 16 KiB | host-report-metadata |
+
+The sorted manifest inventories all other entries with byte sizes, SHA-256 and
+classifications, plus schema, logical artifact name, source head/policy SHA and
+run/attempt. It cannot self-hash. The **10 MiB total per-run ceiling** includes
+the manifest; current entry limits are tighter. Future upload specs fix
+intermediate retention to **1 day** and final report/patch retention to **7 days**;
+other values, filenames and classifications are rejected.
+
+Local preparation `PREPARED` is distinct from delivery `AVAILABLE`: an actual
+trusted upload receipt is required before linking a download. Required edits
+without a delivery receipt remain `UNAVAILABLE` and explicitly unresolved,
+including an upload failure after VERIFIED. The execution verdict stays exactly
+what the verifier observed. Non-edit decisions use `NOT_REQUIRED`. Missing
+originals omit the patch while preserving host verification metadata.
+
+Focused offline checks:
+
+```sh
+backend/.venv/bin/python -m pytest automation/tests/test_reporting.py automation/tests/test_publisher.py automation/tests/test_artifacts.py -q
+```
+
+T07 still needs the trusted installation/input handoff, provider bootstrap,
+per-PR serialization, approved permissions, allowlisted upload orchestration and
+receipt delivery. This library does not authenticate an untrusted host process,
+prove test semantics, implement uploads or attest the verifier's framework
+files independently. No live GitHub write, artifact upload, Docker execution or
+model invocation is needed to test T06.
