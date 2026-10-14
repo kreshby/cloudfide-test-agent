@@ -23,6 +23,7 @@ MESSAGES = MappingProxyType({
     "TS1161": "Unterminated regular expression literal; check for JSX in a .ts file.",
     "TS2304": "Cannot find the referenced name; use the captured current exports and imports.",
     "TS2305": "The imported member is not exported by the referenced module.",
+    "TS2306": "The imported file is not a module; use a module that exports the required member.",
     "TS2307": "Cannot find the imported module or its type declarations.",
     "TS2322": "The assigned value has an incompatible type.",
     "TS2339": "The referenced property does not exist on this type.",

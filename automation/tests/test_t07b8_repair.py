@@ -251,6 +251,36 @@ def test_compiler_messages_cannot_leak_quoted_source_literals():
     assert "private-token" not in canonical([asdict(d) for d in diagnostics]).decode()
 
 
+def test_jest_dom_nonmodule_import_diagnostic_is_repairable():
+    path = "frontend/src/features/todos/api/queryKeys.test.ts"
+    content = b"""import { todoKeys } from './queryKeys'
+import { expect } from '@testing-library/jest-dom'
+import { render, screen } from '@testing-library/react'
+
+describe('todoKeys', () => {
+  it('includes the priorityLists key', () => {
+    expect(todoKeys.priorityLists).toEqual(['todos', 'list', 'priority'])
+  })
+})
+"""
+    # Exact local tsc 5.8.3 --noEmit --pretty false output on trusted main.
+    stdout = (
+        b"src/features/todos/api/queryKeys.test.ts(2,24): error TS2306: File "
+        b"'/mnt/data/repo/taskly-app/frontend/node_modules/@testing-library/jest-dom/types/index.d.ts' is not a module.\n"
+        b"src/features/todos/api/queryKeys.test.ts(7,21): error TS2339: Property 'priorityLists' does not exist on type "
+        b"'{ all: readonly [\"todos\"]; list: readonly [\"todos\", \"list\"]; create: readonly [\"todos\", \"create\"]; "
+        b"update: readonly [\"todos\", \"update\"]; delete: readonly [\"todos\", \"delete\"]; }'.\n"
+    )
+    diagnostics = compiler_diagnostics(stdout, b"", path, content)
+    assert [(d.code, d.line, d.column) for d in diagnostics] == [
+        ("TS2306", 2, 24), ("TS2339", 7, 21),
+    ]
+    # Also accept TS2306 without main's separate missing-property diagnostic.
+    assert compiler_diagnostics(stdout.splitlines(keepends=True)[0], b"", path, content) == diagnostics[:1]
+    assert diagnostics[0].message == MESSAGES["TS2306"]
+    assert "/mnt/data/" not in canonical([asdict(d) for d in diagnostics]).decode()
+
+
 @pytest.mark.parametrize("raw", [
     b"src/value.test.ts(0,1): error TS1005: token expected.\n",
     b"src/value.test.ts(1,99999): error TS1005: token expected.\n",
