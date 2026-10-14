@@ -220,7 +220,10 @@ def project_context(bundle: ContextBundle, target: Target, intended=None, select
                             for e in sorted(bundle.candidate_tests, key=lambda e: e.path)
                             if _target_path(e.path, target) and (intended is None or e.path in intended)],
         "configuration": [_evidence(e, 2048) for e in sorted(bundle.configuration, key=lambda e: e.path)
-                          if _target_path(e.path, target) or (target == Target.BACKEND and e.path == "pytest.ini")],
+                          if (_target_path(e.path, target) or (target == Target.BACKEND and e.path == "pytest.ini"))
+                          # Package roots use the exact captured host evidence;
+                          # the raw frontend manifest is not model input.
+                          and not (target == Target.FRONTEND and e.path == "frontend/package.json")],
         "fixtures": [_evidence(e, 2048) for e in sorted(bundle.fixtures, key=lambda e: e.path)
                      if _target_path(e.path, target)],
         "markers": sorted(bundle.markers),
