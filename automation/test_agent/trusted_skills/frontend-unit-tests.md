@@ -1,9 +1,13 @@
-# frontend-unit-tests v1.1.0
-Use Vitest and project conventions. Directly test the bound selected_source_path
-using its captured current exports/signatures. Use only the exact permitted test
-path, operation and language contract. New tests must statically import the
-selected source through a relative path. RTL availability does not justify
-drifting to a neighboring page/component.
+# frontend-unit-tests v1.2.0
+Use Vitest and the exact host test_path, operation and language contract.
+Do not invent npm packages; use only allowed_package_roots. Relative imports must
+resolve from test_path. A direct selected_source_path import must use exactly
+required_subject_import. Use captured exports/signatures. Indirect behavior tests
+are allowed. Prefer testing a plain exported object/function over hook machinery
+when the selected source is plain data/API.
+
+Example: some/path/queryKeys.test.ts importing some/path/queryKeys.ts uses
+"./queryKeys", never "../queryKeys".
 
 Illustrative identifiers below: replace them with actual captured subject exports;
 never invent buildKey or StatusBadge in the real test.
@@ -33,9 +37,8 @@ describe('StatusBadge', () => {
   })
 })
 ```
-React rendering requiring JSX belongs in .test.tsx. TSX permission never permits
-changing the subject. Helpers/providers are allowed only when required by that
-subject. Use existing mocks, isolated QueryClient when relevant; no real network.
+React JSX belongs in .test.tsx. Use existing mocks and isolated QueryClient when
+relevant; no real network.
 
 Updates: preserve unrelated meaningful cases; add/update only behavior justified
 by the changed selected source. Echo the supplied original SHA-256. Never weaken

@@ -30,8 +30,8 @@ _BOTH = (Target.FRONTEND, Target.BACKEND)
 REGISTRY = MappingProxyType({entry.skill_id: entry for entry in (
     SkillEntry("analyze-change", "1.0.0", "automation/test_agent/trusted_skills/analyze-change.md",
                "fb879bcaa02da848e53b7f2ed0b586e122b7759de574bccf79abb38c1b02d284", _BOTH),
-    SkillEntry("frontend-unit-tests", "1.1.0", "automation/test_agent/trusted_skills/frontend-unit-tests.md",
-               "ac9432a578b20ce1425d9da88130894e7ed4d5a59a5f33527ceddc2ab7f52a28", (Target.FRONTEND,)),
+    SkillEntry("frontend-unit-tests", "1.2.0", "automation/test_agent/trusted_skills/frontend-unit-tests.md",
+               "a384facecc690f92810f3d2d36f98e98997ad760bf64db6ef66017a83927c0ae", (Target.FRONTEND,)),
     SkillEntry("backend-unit-tests", "1.0.0", "automation/test_agent/trusted_skills/backend-unit-tests.md",
                "3ed8aa01cc9120212cc1a920fadf9fa29b66e1d855c392513652b523fcdacad8", (Target.BACKEND,)),
     SkillEntry("verify-test-patch", "1.0.0", "automation/test_agent/trusted_skills/verify-test-patch.md",

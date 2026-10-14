@@ -126,13 +126,16 @@ def test_independent_structural_resolution(parser_image, tmp_path, test, source,
     contract = {"source": {"head_sha": "c" * 40}, "changes_sha256": "d" * 64,
                 "path": test, "selected_source_path": source, "operation": "create",
                 "content_sha256": digest(content.encode()), **language_contract(test)}
+    (root/'frontend/package.json').write_bytes(v.canonical({'devDependencies': {'vitest': '1'}}))
     (root / "structural-input.json").write_bytes(v.canonical([contract]))
     result, reports, error = v.Sandbox(v.Executor(), image, env).execute("frontend-patched-structural", root, ())
     assert error is None and not result.timed_out and reports == {}
     facts = v.validate_structural(v.parse_json(result.stdout), [contract])[0]
     expected = import_kind == "canonical"
-    assert result.exit_code == 0 and facts["passed"]
+    invalid = import_kind == 'wrong-relative'
+    assert result.exit_code == (1 if invalid else 0) and facts['passed'] == (not invalid)
     assert facts["subject_imported"] == expected
     assert facts["syntax_diagnostics"] == facts["jsx_nodes"] == 0
-    assert facts["categories"] == ([] if expected else ["selected-subject-not-directly-imported"])
+    assert facts["categories"] == ([] if expected else
+        (['unresolved-relative-import'] if invalid else []) + ['selected-subject-not-directly-imported'])
     assert (root / test).read_text() == content

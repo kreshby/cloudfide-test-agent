@@ -23,7 +23,7 @@ from automation.tests.test_verification import capture
 def test_authenticated_canonical_patterns_and_backend_unchanged(tmp_path):
     skill = load_skill('frontend-unit-tests', Target.FRONTEND)
     assert len(skill.body.encode()) <= MAX_SKILL_BYTES == 2048
-    assert skill.record.version == REGISTRY['frontend-unit-tests'].version == '1.1.0'
+    assert skill.record.version == REGISTRY['frontend-unit-tests'].version == '1.2.0'
     assert skill.record.content_sha256 == digest(skill.body.encode()) == REGISTRY['frontend-unit-tests'].sha256
     assert 'Pure .test.ts pattern' in skill.body and "import { buildKey } from './buildKey'" in skill.body
     pure = skill.body.split('```ts\n')[1].split('```')[0]
@@ -151,9 +151,11 @@ def test_relevance_warning_preserves_existing_compiler_repair_eligibility(rig):
     assert evidence.compiler_failure is not None
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope='session')
 def parser_image():
     # Reuse the existing opt-in isolated Docker test stack, never ambient Node.
+    # One immutable pinned image serves all parser modules; each call still gets
+    # a fresh isolated sandbox. Avoid rebuilding the same image tag per module.
     if os.environ.get('T05_DOCKER_SMOKE')!='1': pytest.skip('explicit Docker parser fixtures only')
     image=v.build_image();env=v.validate_image(v.Executor(),image)
     v.validate_daemon(v.Executor())
@@ -178,17 +180,17 @@ JSX="import { it, expect } from 'vitest'\nimport { Widget } from './subject'\nit
     (PURE.replace("'./subject'","'./neighbor'"),'.ts',{'neighbor.ts':'export const value = 2'},True),
     (PURE.replace("import { value } from './subject'","// import { value } from './subject'"),'.ts',{},True),
     (PURE.replace("import { value } from './subject'",'const subject = "./subject"'),'.ts',{},True),
-    (PURE.replace("'./subject'","'subject'"),'.ts',{},True),
+    (PURE.replace("'./subject'","'subject'"),'.ts',{},False),
     (PURE.replace("'./subject'","'/work/repo/frontend/src/subject.ts'"),'.ts',{},False),
     (PURE.replace("'./subject'","'../../../subject'"),'.ts',{},False),
-    (PURE.replace("'./subject'","'./missing'"),'.ts',{},True),
+    (PURE.replace("'./subject'","'./missing'"),'.ts',{},False),
     (PURE.replace("'./subject'","'./neighbor'"),'.tsx',{'neighbor.ts':'export const value = 2'},True),
     (PURE.replace("'./subject'","'./barrel'"),'.ts',{'barrel.ts':"export { value } from './subject'"},True),
     (PURE.replace("'./subject'","'./barrel'"),'.tsx',{'barrel.ts':"export { value } from './subject'"},True),
     (PURE,'.ts',{'subject.tsx':'export const value = 2'},True),
     (PURE.replace('import { value }','import type { value }'),'.ts',{},True),
     (PURE.replace("import { value } from './subject'","import './subject'"),'.ts',{},True),
-    (PURE+"throw new Error('MUST NEVER EXECUTE')\nrequire('node:fs').writeFileSync('/reports/executed','bad')\n",'.ts',{},True),
+    (PURE+"throw new Error('MUST NEVER EXECUTE')\nrequire('node:fs').writeFileSync('/reports/executed','bad')\n",'.ts',{},False),
 ])
 def test_actual_pinned_typescript_ast(parser_image,tmp_path,content,extension,extra,expected):
     facts,result = parse_fixture(parser_image,tmp_path,content,extension,extra)
@@ -204,6 +206,8 @@ def parse_fixture(parser_image,tmp_path,content,extension,extra,*,subject_name=N
     image,env=parser_image
     root=tmp_path/'input';root.mkdir(mode=0o755)
     src=root/'frontend/src';src.mkdir(parents=True)
+    (root/'frontend/package.json').write_bytes(v.canonical({'devDependencies': {
+        '@testing-library/react': '1', 'vitest': '1'}}))
     subject='frontend/src/'+(subject_name or 'subject'+extension)
     (root/subject).parent.mkdir(parents=True,exist_ok=True)
     (root/subject).write_text('export const value = 1\n')
@@ -254,7 +258,8 @@ def test_unsafe_import_still_blocks_with_direct_subject(parser_image, tmp_path, 
     facts, result = parse_fixture(parser_image, tmp_path, PURE + statement + '\n', '.ts', {}, operation=operation)
     assert result.exit_code == 1 and not facts[0]['passed']
     assert facts[0]['subject_imported']
-    assert facts[0]['categories'] == ['unsafe-import-path']
+    assert facts[0]['categories'] == ['unsafe-import-path'] + (
+        ['unresolved-relative-import'] if '../../../outside' in statement else [])
 
 
 @pytest.mark.parametrize('failure',['jsx','unsafe','subject'])
@@ -281,6 +286,8 @@ def test_actual_repaired_content_preserves_hard_gates_and_advisory_import(parser
     files['frontend/src/base.test.ts']=(b"import {it,expect} from 'vitest'\nit('base',()=>expect(1).toBe(1))\n",0o644)
     for p,(data,mode) in files.items():
         dest=root/p;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data);dest.chmod(mode)
+    files['frontend/src/neighbor.ts'] = (b'export const clamp = 1\n', 0o644)
+    (root/'frontend/src/neighbor.ts').write_bytes(files['frontend/src/neighbor.ts'][0])
     executor=CompilerExecutor(root,bundle.source,files,changed=tuple(f.path for f in bundle.changed_files))
     executor.fail_step='frontend-patched-typecheck'
     executor.compiler_output=b"src/clamp.test.ts(2,10): error TS2305: Module has no exported member.\n"

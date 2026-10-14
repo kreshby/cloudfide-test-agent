@@ -221,7 +221,8 @@ def test_stale_binding_or_target_rejected_in_every_initial_stage(tmp_path, field
 def test_response_bound_to_another_source_cannot_select_source(tmp_path):
     bundle = bundle_for('frontend-generate')
     stale = replace(bundle, source=replace(bundle.source, head_sha='9' * 40),
-                    sources=tuple(replace(e, source_sha='9' * 40) for e in bundle.sources))
+                    sources=tuple(replace(e, source_sha='9' * 40) for e in bundle.sources),
+                    configuration=tuple(replace(e, source_sha='9' * 40) for e in bundle.configuration))
     _, _, agent = make_agent(tmp_path, responses=transcript(stale)[:1])
     assert agent.run().state == State.FAILED
 

@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 import difflib
+from pathlib import Path
 
 from automation.benchmarks.scenarios import SCENARIOS
 from automation.test_agent.agent import project_context
@@ -10,7 +11,7 @@ from automation.test_agent.context import (CandidateTest, ChangedFile, ContextBu
 from automation.test_agent.contracts import Target
 from automation.test_agent.provider import Stage, canonical, digest, strict_json
 from automation.test_agent.repair import language_contract
-from automation.test_agent.subjects import required_subject_import
+from automation.test_agent.import_contract import frontend_import_contract
 
 
 FRONTEND_CODE = """import { render, screen } from '@testing-library/react'
@@ -80,6 +81,9 @@ def bundle_for(case):
                        ('known-config',), 'available', 48, "import '@testing-library/jest-dom/vitest'\n"),
               Evidence('backend/tests/conftest.py', identity.head_sha, 'f' * 40, 'configuration',
                        ('known-config',), 'available', 38, '# TestClient and isolated mocks in fixtures\n'))
+    manifest = (Path(__file__).resolve().parents[2] / 'frontend/package.json').read_text()
+    config += (Evidence('frontend/package.json', identity.head_sha, 'f' * 40, 'configuration',
+                        ('known-config',), 'available', len(manifest.encode()), manifest),)
     return ContextBundle(identity, WorkflowIdentity(42, 7, 1, 101, 'pull_request', identity.head_sha),
                          tuple(changed), tuple(sources), tests, (), config, candidates, (), (), ())
 
@@ -135,8 +139,8 @@ def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
                      if e['state'] == 'available' and e.get('content') is not None}
         payload = {'decision': decision, 'evidence': projection,
                    'permitted_test_paths': plan['intended_test_files'], 'original_sha256': originals,
-                   **({'required_subject_import': required_subject_import(
-                       plan['intended_test_files'][0], decision['selected_source_path'])}
+                   **(frontend_import_contract(bundle,
+                       plan['intended_test_files'][0], decision['selected_source_path'])
                       if target == Target.FRONTEND else {}),
                    **({'test_operation': 'create' if decision['action'] == 'generate' else 'update'}
                       if target == Target.FRONTEND else {}),

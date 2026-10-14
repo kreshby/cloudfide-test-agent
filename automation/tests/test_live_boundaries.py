@@ -11,7 +11,7 @@ from automation.test_agent.agent import AgentError, MAX_PROJECTION_BYTES, State,
 from automation.test_agent.contracts import Target
 from automation.test_agent.handoff import decode, encode, report, successful, validate
 from automation.test_agent.repair import language_contract
-from automation.test_agent.subjects import required_subject_import
+from automation.test_agent.import_contract import frontend_import_contract
 from automation.test_agent.provider import (COMPLETION_TOKENS, CONTEXT_TOKENS, MAX_REQUEST_BYTES,
                                            FakeProvider, LocalLlamaProvider, ProviderError, Stage, canonical, digest)
 from automation.test_agent.publisher import GitHubPublisherAdapter, PublisherAuthor, publish
@@ -50,7 +50,7 @@ def full_stack_transcript(bundle):
                     "    assert client.get('/api/todos?priority=urgent').status_code == 422\n"
                     "    repository_mock.list.assert_not_called()\n")
         payload = {"decision": decision, "evidence": edits, "permitted_test_paths": [path],
-                   **({'required_subject_import': required_subject_import(path, decision['selected_source_path'])}
+                   **(frontend_import_contract(bundle, path, decision['selected_source_path'])
                       if target == Target.FRONTEND else {}),
                    **({'test_operation': 'update'} if target == Target.FRONTEND else {}),
                    "original_sha256": {path: original["content_sha256"]},

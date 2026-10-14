@@ -15,6 +15,8 @@ MAX_POSITION = 65536
 # Compiler messages can quote arbitrary source literals, including secrets.
 # Supply a fixed explanation of each eligible code instead of those literals.
 MESSAGES = MappingProxyType({
+    "UNRESOLVED_RELATIVE_IMPORT": "A relative import does not resolve from this test path; use only captured repository modules and the host-provided import contract.",
+    "UNKNOWN_PACKAGE_IMPORT": "A package import is not declared by the captured frontend package manifest; use only host-listed installed package roots.",
     "TS1005": "A required TypeScript token is missing; check syntax at this position.",
     "TS1109": "An expression is required at this position.",
     "TS1128": "A declaration or statement is required at this position.",
@@ -121,7 +123,10 @@ class CompilerFailure:
 
 REPAIR_INSTRUCTIONS = """You are repairing your previously generated unit test.
 Keep EXACTLY the accepted path. Return COMPLETE replacement file content.
-Modify no application source. Fix only the reported compiler problem.
+Modify no application source. Fix only the reported compiler or import problem.
+Do not invent dependencies or use packages outside allowed_package_roots.
+Relative imports must resolve from test_path. A direct selected-source import
+must use required_subject_import. Return the complete replacement file only.
 Preserve the intended behavioral coverage and all existing tests/assertions.
 Do not weaken expectations merely to pass, skip assertions, or add skip/only.
 The host language contract is authoritative: do not use JSX when jsx_allowed=false.

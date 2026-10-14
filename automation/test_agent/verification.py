@@ -26,9 +26,10 @@ from automation.verifier.profiles import PROFILES, STACK_PROFILES, command
 from .contracts import (EditOperation, ExecutionKind, ExecutionResult,
                         FinalHostStatus, HostResult, SourceIdentity, Target, VerifierResult)
 from .patches import TrustedChanges
-from .repair import CompilerFailure, compiler_diagnostics
+from .repair import CompilerFailure, CompilerDiagnostic, MESSAGES, compiler_diagnostics
 from .repair import language_contract
 from .subjects import frontend_source
+from .import_contract import package_roots
 from .policy import (CREATE_FILE_MODE, MAX_EDITED_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES,
                      SUPPORTED_FILE_MODES, PolicyError, ValidatedEdit,
                      check_weakening, normalized_path, test_path)
@@ -908,7 +909,12 @@ class CommandEvidence:
 
 
 STRUCTURAL_WARNINGS = frozenset({"selected-subject-not-directly-imported"})
-STRUCTURAL_CATEGORIES = frozenset({"syntax-invalid", "jsx-not-allowed", "unsafe-import-path"}) | STRUCTURAL_WARNINGS
+STRUCTURAL_IMPORT_DIAGNOSTICS = MappingProxyType({
+    'unresolved-relative-import': 'UNRESOLVED_RELATIVE_IMPORT',
+    'unknown-package-import': 'UNKNOWN_PACKAGE_IMPORT',
+})
+STRUCTURAL_CATEGORIES = (frozenset({"syntax-invalid", "jsx-not-allowed", "unsafe-import-path"})
+                         | STRUCTURAL_WARNINGS | frozenset(STRUCTURAL_IMPORT_DIAGNOSTICS))
 
 
 def structural_contracts(source, changes):
@@ -987,6 +993,7 @@ class Verifier:
             if changes.source != source:
                 raise Stale("accepted changes source mismatch")
             files = snapshot(self.executor, repository_root, source, changes)
+            package_roots(files['frontend/package.json'][0].decode())
             contracts = structural_contracts(source, changes)
             if any(c["selected_source_path"] not in files or c["selected_source_path"] not in changes.changed_files
                    for c in contracts):
@@ -1090,6 +1097,19 @@ class Verifier:
                             edit = frontend_edits[0]
                             diagnostics = compiler_diagnostics(result.stdout, result.stderr, edit.path, edit.content)
                             if diagnostics:
+                                compiler_failure = CompilerFailure(
+                                    source, edit.path, changes_digest, digest(edit.content),
+                                    digest(canonical([asdict(c) for c in commands])), diagnostics)
+                        elif (step == 'frontend-patched-structural' and error == 'generated-test-structural-failure'
+                              and result.exit_code == 1 and not result.timed_out and not result.truncated
+                              and len(frontend_edits) == len(structural) == 1
+                              and {'frontend-baseline-typecheck', 'frontend-baseline-suite'} <= guards
+                              and all(c.passed for c in commands[:-1])):
+                            categories = set(structural[0]['categories']) - STRUCTURAL_WARNINGS
+                            if categories and categories <= STRUCTURAL_IMPORT_DIAGNOSTICS.keys():
+                                edit = frontend_edits[0]
+                                diagnostics = tuple(CompilerDiagnostic(code, 1, 1, MESSAGES[code])
+                                    for category, code in STRUCTURAL_IMPORT_DIAGNOSTICS.items() if category in categories)
                                 compiler_failure = CompilerFailure(
                                     source, edit.path, changes_digest, digest(edit.content),
                                     digest(canonical([asdict(c) for c in commands])), diagnostics)

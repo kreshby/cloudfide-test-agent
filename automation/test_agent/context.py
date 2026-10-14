@@ -30,7 +30,7 @@ MAX_TEST_SCAN_FILES = 64
 MAX_TEST_SCAN_BYTES = 256 * 1024
 MAX_PERMITTED_TEST_PATHS = 32
 CONFIG_PATHS = (
-    "frontend/vite.config.ts", "frontend/src/test/setup.ts",
+    "frontend/package.json", "frontend/vite.config.ts", "frontend/src/test/setup.ts",
     "backend/pyproject.toml", "backend/tests/conftest.py", "pytest.ini",
 )
 FIXTURE_PATHS = ("frontend/src/test/todoFixture.ts", "backend/tests/mocks.py")

@@ -8,6 +8,7 @@ import base64
 from copy import deepcopy
 import hashlib
 import json
+from pathlib import Path
 
 from automation.test_agent.context import collect_context
 from automation.test_agent.github import GitHubReader, PAGE_SIZE, Response
@@ -66,6 +67,7 @@ class FixtureTransport:
         self.add("frontend/src/other/Unrelated.test.ts", "it('other', () => expect(2).toBe(2))\n")
         self.add("backend/tests/core/test_unrelated.py", "def test_other():\n    assert 2 == 2\n")
         self.add("frontend/vite.config.ts", "export default { test: { environment: 'jsdom' } }\n")
+        self.add("frontend/package.json", (Path(__file__).resolve().parents[2] / 'frontend/package.json').read_text())
         self.add("frontend/src/test/setup.ts", "import '@testing-library/jest-dom/vitest'\n")
         self.add("frontend/src/test/todoFixture.ts", "export const todoFixture = { id: 1, title: 'demo' }\n")
         self.add("backend/pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')

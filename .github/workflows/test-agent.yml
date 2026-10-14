@@ -98,7 +98,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-      pull-requests: read
+      pull-requests: write
       issues: write
     concurrency:
       group: test-agent-publisher-${{ needs.prepare.outputs.repository_id }}-${{ needs.prepare.outputs.pr_number }}

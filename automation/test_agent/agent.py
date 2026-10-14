@@ -17,6 +17,7 @@ from .skills import SkillError, load_skill
 from .diagnostics import Diagnostic, safe_diagnostic
 from .protocol import MAX_INTENDED_TEST_FILES, stage_schema, stage_shape
 from .subjects import captured_frontend_subjects, required_subject_import
+from .import_contract import frontend_import_contract
 
 
 MAX_PROVIDER_CALLS = 5
@@ -352,10 +353,11 @@ class UnitTestAgent:
         payload["binding"] = binding
         response_schema = stage_schema(stage, target, binding, payload["input"])
         system = UNIT_TEST_AGENT + "\n" + "\n".join(s.body for s in loaded) + (
-            "\nFor a NEW frontend test, statically import selected_source_path using exactly "
-            "the host-provided required_subject_import module specifier. Use actual captured "
-            "exports/signatures from selected_source_path. Do not replace it with a neighboring "
-            "page/component/barrel. For updates, preserve established import relationships.\n"
+            "\nDo not invent npm packages; use only allowed_package_roots. Relative imports "
+            "must resolve from test_path. When directly importing selected_source_path, use "
+            "exactly the host-provided required_subject_import module specifier and actual captured exports/signatures. "
+            "Prefer directly testing a plain exported object/function over hook infrastructure "
+            "when the selected source is plain data/API. Valid indirect behavior tests are allowed.\n"
             if stage == Stage.EDITS and target == Target.FRONTEND else "") + (
             REPAIR_INSTRUCTIONS if stage == Stage.REPAIR else "") + (
             "\nResponse JSON schema (all fields required; no extra fields):\n" +
@@ -456,8 +458,8 @@ class UnitTestAgent:
                     edit_response = self._ask(Stage.EDITS, target, {
                         "decision": asdict(decision), "evidence": edit_projection,
                         "permitted_test_paths": list(plan.intended_test_files), "original_sha256": originals,
-                        **({"required_subject_import": required_subject_import(
-                            plan.intended_test_files[0], decision.selected_source_path)}
+                        **(frontend_import_contract(self._bundle,
+                            plan.intended_test_files[0], decision.selected_source_path)
                            if target == Target.FRONTEND else {}),
                         **({"test_operation": "create" if decision.action == ModelAction.GENERATE else "update"}
                            if target == Target.FRONTEND else {}),
@@ -558,7 +560,7 @@ class UnitTestAgent:
                 "diagnostics_sha256": feedback.sha256,
                 "diagnostics": [asdict(d) for d in feedback.diagnostics],
                 **language_contract(previous.path),
-                "selected_source_path": decision.selected_source_path,
+                **frontend_import_contract(self._bundle, previous.path, decision.selected_source_path),
                 "evidence": self._projection(Target.FRONTEND, [previous.path], decision.selected_source_path),
                 "decision": asdict(decision),
             }, ("frontend-unit-tests",))
