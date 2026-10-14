@@ -13,6 +13,7 @@ export function useDeleteTodoMutation() {
       queryClient.setQueryData<Todo[]>(todoKeys.list, (current) =>
         current?.filter((todo) => todo.id !== id),
       )
+      await queryClient.invalidateQueries({ queryKey: todoKeys.priorityLists })
     },
   })
 }
