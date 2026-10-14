@@ -98,7 +98,7 @@ def test_model_cannot_override_host_import(tmp_path, location):
     provider = FakeProvider(tuple(replies))
     result = UnitTestAgent(bundle, tmp_path, provider).run()
     assert result.state == State.FAILED
-    assert result.diagnostic == (Diagnostic.PATH if location == 'package-item' else Diagnostic.SCHEMA)
+    assert result.diagnostic == (Diagnostic.SCHEMA if location == 'decision' else Diagnostic.FRONTEND_CREATE_SHAPE)
     if index == 1:
         assert json.loads(provider.requests[1].user)["input"]["required_subject_import"] == "./SubmitButton"
 

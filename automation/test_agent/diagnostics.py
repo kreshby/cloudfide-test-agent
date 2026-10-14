@@ -15,6 +15,10 @@ class Diagnostic(StrEnum):
     BINDING = "decision-binding"
     EVIDENCE = "decision-evidence"
     PATH = "decision-path"
+    FRONTEND_CREATE_SHAPE = "frontend-create-shape"
+    FRONTEND_CREATE_SUBJECT = "frontend-create-subject"
+    FRONTEND_CREATE_PACKAGE = "frontend-create-package"
+    FRONTEND_CREATE_BODY = "frontend-create-body"
     POLICY = "policy-rejected"
     VERIFIER = "verifier-unavailable"
     CONTRACT = "agent-contract-failed"
@@ -31,6 +35,10 @@ EXPLANATIONS = MappingProxyType({
     Diagnostic.BINDING: "The stage response did not match the exact request binding and target.",
     Diagnostic.EVIDENCE: "The decision cited unavailable or incomplete test evidence.",
     Diagnostic.PATH: "The decision selected invalid or unavailable test paths.",
+    Diagnostic.FRONTEND_CREATE_SHAPE: "The frontend CREATE response violated the structured field or binding contract.",
+    Diagnostic.FRONTEND_CREATE_SUBJECT: "The frontend CREATE subject imports lacked trusted captured export authority.",
+    Diagnostic.FRONTEND_CREATE_PACKAGE: "The frontend CREATE package imports lacked trusted manifest authority.",
+    Diagnostic.FRONTEND_CREATE_BODY: "The frontend CREATE body contained forbidden or unsupported constructs.",
     Diagnostic.POLICY: "Trusted test edit policy rejected the proposal.",
     Diagnostic.VERIFIER: "Trusted verification feedback was unavailable.",
     Diagnostic.CONTRACT: "The agent did not produce an accepted terminal result.",

@@ -1,46 +1,37 @@
-# frontend-unit-tests v1.2.0
-Use Vitest and the exact host test_path, operation and language contract.
-Do not invent npm packages; use only allowed_package_roots. Relative imports must
-resolve from test_path. A direct selected_source_path import must use exactly
-required_subject_import. Use captured exports/signatures. Indirect behavior tests
-are allowed. Prefer testing a plain exported object/function over hook machinery
-when the selected source is plain data/API.
+# frontend-unit-tests v1.3.0
+Use Vitest, exact host test_path/operation/language, allowed_package_roots and
+captured exports/signatures. Prefer plain exported objects/functions for data/API;
+indirect behavior tests are allowed. Use meaningful assertions; no real network.
 
-Example: some/path/queryKeys.test.ts importing some/path/queryKeys.ts uses
-"./queryKeys", never "../queryKeys".
+CREATE (including CREATE repair): return only the structured response required by
+the schema: subject_imports, package_imports, test_body plus binding and target. Do not return a complete file or write repository-local import declarations.
+subject_imports must use available_subject_exports; package_imports must use
+allowed_package_roots. The host constructs all imports and file bytes,
+using exactly required_subject_import. test_body contains assertions/test code only:
+no import/export/require/dynamic import/eval/Function. Use ordinary quoted strings,
+no templates.
 
-Illustrative identifiers below: replace them with actual captured subject exports;
-never invent buildKey or StatusBadge in the real test.
-
-Pure .test.ts pattern (TypeScript, not TSX):
+Illustrative buildKey/StatusBadge: replace with actual captured exports.
+Pure .test.ts pattern, illustrative CREATE fields:
+subject_imports: ["buildKey"]
+package_imports: [{"module":"vitest","names":["describe","expect","it"]}]
+test_body:
 ```ts
-import { describe, expect, it } from 'vitest'
-import { buildKey } from './buildKey'
 describe('buildKey', () => {
   it('includes the selected value', () => {
     expect(buildKey('high')).toEqual(['items', 'high'])
   })
 })
 ```
-For .test.ts, JSX is forbidden: never emit <Component />, JSX fragments or JSX
-provider wrappers. Use pure TypeScript; no React rendering or component wrapper.
+For .test.ts, JSX is forbidden: no React rendering, fragments or provider wrappers.
+React/RTL .test.tsx pattern (JSX permitted): request render/screen from allowed
+@testing-library/react in package_imports; body may use
+render(<StatusBadge status="done" />) and expect(screen.getByText('done')).toBeInTheDocument().
+Use existing mocks and isolated QueryClient.
 
-React/RTL .test.tsx pattern (JSX permitted):
-```tsx
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
-import { StatusBadge } from './StatusBadge'
-describe('StatusBadge', () => {
-  it('renders the selected status', () => {
-    render(<StatusBadge status="done" />)
-    expect(screen.getByText('done')).toBeInTheDocument()
-  })
-})
-```
-React JSX belongs in .test.tsx. Use existing mocks and isolated QueryClient when
-relevant; no real network.
-
-Updates: preserve unrelated meaningful cases; add/update only behavior justified
-by the changed selected source. Echo the supplied original SHA-256. Never weaken
-expectations or add skip/only/todo/xfail, conditional or snapshot-only tests.
-Return complete code as data; never execute it or claim it passed.
+UPDATE only: return complete updated code as data under the existing UPDATE schema.
+Resolve relative imports from test_path; direct selected_source_path imports
+must use exactly required_subject_import. Preserve unrelated meaningful tests;
+change only cases justified by changed behavior. Echo the exact original SHA-256.
+Never weaken expectations or add skip/only/todo/xfail, conditional or snapshot-only
+tests. Never execute code or claim it passed.

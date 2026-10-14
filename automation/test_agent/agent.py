@@ -18,7 +18,7 @@ from .diagnostics import Diagnostic, safe_diagnostic
 from .protocol import MAX_INTENDED_TEST_FILES, stage_schema, stage_shape, structured_frontend_create
 from .subjects import captured_frontend_subjects, required_subject_import
 from .import_contract import frontend_import_contract
-from .frontend_create import frontend_create_contract, assemble_frontend_create
+from .frontend_create import FrontendCreateError, frontend_create_contract, assemble_frontend_create
 
 
 MAX_PROVIDER_CALLS = 5
@@ -48,7 +48,9 @@ does not establish existing coverage. Prefer the direct behavior-changing API
 boundary when one small test can cover the change.
 In edits use the intended subject's exact current head exports and signatures.
 Frontend .test.ts files require plain TypeScript without JSX; JSX requires
-.test.tsx. Return complete file contents without code fences. For filters assert
+.test.tsx. For backend edits and frontend UPDATE, return complete file contents
+without code fences. For frontend CREATE, follow the structured skill contract.
+For filters assert
 a valid filter at the observable request or cache boundary.
 """
 
@@ -357,20 +359,7 @@ class UnitTestAgent:
         binding = digest(canonical(payload))
         payload["binding"] = binding
         response_schema = stage_schema(stage, target, binding, payload["input"])
-        system = (UNIT_TEST_AGENT.replace('Return complete file contents without code fences.',
-                  'For frontend create return structured imports and test_body without code fences.')
-                  if structured else UNIT_TEST_AGENT) + "\n" + "\n".join(s.body for s in loaded) + (
-            "\nFrontend create: choose subject_imports only from available_subject_exports, "
-            "package_imports only from allowed_package_roots, and test_body containing assertions. "
-            "The host constructs all imports; test_body must contain no import/export, require, "
-            "dynamic import, eval or Function. Use ordinary quoted strings, no templates.\n"
-            if structured else "") + (
-            "\nDo not invent npm packages; use only allowed_package_roots. Relative imports "
-            "must resolve from test_path. When directly importing selected_source_path, use "
-            "exactly the host-provided required_subject_import module specifier and actual captured exports/signatures. "
-            "Prefer directly testing a plain exported object/function over hook infrastructure "
-            "when the selected source is plain data/API. Valid indirect behavior tests are allowed.\n"
-            if stage == Stage.EDITS and target == Target.FRONTEND and not structured else "") + (
+        system = UNIT_TEST_AGENT + "\n" + "\n".join(s.body for s in loaded) + (
             (REPAIR_INSTRUCTIONS.replace('Return COMPLETE replacement file content.',
                  'Return the same structured create fields; the host rebuilds the replacement.').replace(
                  'Return the complete replacement file only.', 'Return structured imports and test_body only.')
@@ -398,7 +387,13 @@ class UnitTestAgent:
         value = strict_json(raw, RESPONSE_LIMITS[stage])
         self._event("response", stage=stage, target=target, response_sha256=digest(raw.encode()),
                     response_bytes=len(raw.encode()))
-        _fields(value, response_schema["required"])
+        try:
+            _fields(value, response_schema["required"])
+        except AgentError:
+            if structured:
+                raise FrontendCreateError('stage fields rejected; no tools or extra actions allowed',
+                                          Diagnostic.FRONTEND_CREATE_SHAPE) from None
+            raise
         if value["binding"] != binding or value["target"] != str(target):
             raise AgentError("stale stage binding or target", diagnostic=Diagnostic.BINDING)
         return value
@@ -505,7 +500,8 @@ class UnitTestAgent:
             self._transition(State.PROPOSAL_READY)
             self._transition(State.AWAITING_VERIFICATION if edits else State.FINISHED)
         except (AgentError, ContractError, ProviderError, SkillError, PolicyError) as error:
-            category = (Diagnostic.SCHEMA if isinstance(error, ContractError) else
+            category = (error.diagnostic if isinstance(error, FrontendCreateError) else
+                        Diagnostic.SCHEMA if isinstance(error, ContractError) else
                         Diagnostic.PATH if isinstance(error, PolicyError) else
                         safe_diagnostic(getattr(error, "diagnostic", None)))
             self._fail(str(error), category)

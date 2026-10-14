@@ -23,13 +23,15 @@ from automation.tests.test_verification import capture
 def test_authenticated_canonical_patterns_and_backend_unchanged(tmp_path):
     skill = load_skill('frontend-unit-tests', Target.FRONTEND)
     assert len(skill.body.encode()) <= MAX_SKILL_BYTES == 2048
-    assert skill.record.version == REGISTRY['frontend-unit-tests'].version == '1.2.0'
+    assert skill.record.version == REGISTRY['frontend-unit-tests'].version == '1.3.0'
     assert skill.record.content_sha256 == digest(skill.body.encode()) == REGISTRY['frontend-unit-tests'].sha256
-    assert 'Pure .test.ts pattern' in skill.body and "import { buildKey } from './buildKey'" in skill.body
+    assert 'Pure .test.ts pattern' in skill.body and 'subject_imports: ["buildKey"]' in skill.body
+    assert 'package_imports: [{"module":"vitest","names":["describe","expect","it"]}]' in skill.body
     pure = skill.body.split('```ts\n')[1].split('```')[0]
     assert '<' not in pure and 'render(' not in pure and "toEqual(['items', 'high'])" in pure
     assert 'React/RTL .test.tsx pattern' in skill.body and '<StatusBadge status="done" />' in skill.body
-    assert "import { StatusBadge } from './StatusBadge'" in skill.body
+    assert 'render/screen from allowed' in skill.body and '@testing-library/react in package_imports' in skill.body
+    assert 'import { ' not in skill.body
     backend = load_skill('backend-unit-tests', Target.BACKEND)
     assert backend.record.version == '1.0.0'
     assert backend.record.content_sha256 == '3ed8aa01cc9120212cc1a920fadf9fa29b66e1d855c392513652b523fcdacad8'

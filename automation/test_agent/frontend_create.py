@@ -6,9 +6,18 @@ TypeScript parser: the isolated compiler remains authoritative for syntax/types.
 
 import re
 
-from .import_contract import frontend_import_contract
+from .diagnostics import Diagnostic
+from .import_contract import captured_package_roots
 from .policy import PolicyError
-from .subjects import captured_frontend_subjects
+from .subjects import captured_frontend_subjects, required_subject_import
+
+
+class FrontendCreateError(PolicyError):
+    """Typed CREATE-only failure; messages and categories are host-owned."""
+
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 MAX_SYMBOLS = 64
@@ -33,9 +42,11 @@ def _tokens(text, maximum, *, for_body=False):
     this conservative subset. Ordinary JSX closing tags are recognized only as
     opaque tokens. None of this text is executed or loaded as a module.
     """
+    diagnostic = (Diagnostic.FRONTEND_CREATE_BODY if for_body
+                  else Diagnostic.FRONTEND_CREATE_SUBJECT)
     if (type(text) is not str or not text.strip() or len(text.encode()) > maximum
             or any(ord(c) < 32 and c not in '\n\r\t' for c in text)):
-        raise PolicyError('unsupported frontend structured text')
+        raise FrontendCreateError('unsupported frontend structured text', diagnostic)
     tokens, i = [], 0
     while i < len(text):
         c = text[i]
@@ -47,7 +58,7 @@ def _tokens(text, maximum, *, for_body=False):
         elif text.startswith('/*', i):
             end = text.find('*/', i + 2)
             if end < 0:
-                raise PolicyError('unterminated frontend comment')
+                raise FrontendCreateError('unterminated frontend comment', diagnostic)
             i = end + 2
         elif c in "'\"":
             quote = c
@@ -55,12 +66,12 @@ def _tokens(text, maximum, *, for_body=False):
             i += 1
             while i < len(text) and text[i] != quote:
                 if text[i] in '\n\r':
-                    raise PolicyError('unsupported frontend literal')
+                    raise FrontendCreateError('unsupported frontend literal', diagnostic)
                 if text[i] == '\\':
                     i += 1
                 i += 1
             if i >= len(text):
-                raise PolicyError('unterminated frontend literal')
+                raise FrontendCreateError('unterminated frontend literal', diagnostic)
             i += 1
             if for_body and (text[start + 1:i - 1].startswith(('./', '../'))
                     or re.search(r'\b(?:import|require|eval|Function)\b|\\(?:u|x|[0-7])', text[start:i])):
@@ -69,7 +80,7 @@ def _tokens(text, maximum, *, for_body=False):
                 # strings remain data; this deliberately conservative check
                 # does not attempt JavaScript constant folding. Relative module
                 # literals are excluded even for package-provided mock loaders.
-                raise PolicyError('test body loader literal rejected')
+                raise FrontendCreateError('test body loader literal rejected', diagnostic)
             tokens.append('<literal>')
         elif text.startswith('</', i) and (closing := re.match(r'</[A-Za-z][A-Za-z0-9.]*\s*>', text[i:])):
             tokens.append('<jsx-close>')
@@ -78,7 +89,7 @@ def _tokens(text, maximum, *, for_body=False):
             tokens.append('<jsx-self-close>')
             i += 2
         elif c in '`\\/' or ord(c) > 127:
-            raise PolicyError('ambiguous frontend lexical form')
+            raise FrontendCreateError('ambiguous frontend lexical form', diagnostic)
         elif match := _IDENTIFIER.match(text, i):
             tokens.append(match.group())
             i = match.end()
@@ -96,7 +107,7 @@ def direct_named_exports(content):
         if token == '<' and not stack:
             # Top-level JSX text can contain declaration-looking words. Generic
             # top-level headers/comparisons are also outside this narrow subset.
-            raise PolicyError('ambiguous top-level frontend syntax')
+            raise FrontendCreateError('ambiguous top-level frontend syntax', Diagnostic.FRONTEND_CREATE_SUBJECT)
         if token == 'export' and not stack and (i == 0 or tokens[i - 1] != '.'):
             tail = tokens[i + 1:i + 5]
             # Unsupported export lists, defaults, modifiers and aliases supply
@@ -114,56 +125,68 @@ def direct_named_exports(content):
             stack.append(token)
         elif token in pairs:
             if not stack or stack.pop() != pairs[token]:
-                raise PolicyError('unbalanced frontend source delimiters')
+                raise FrontendCreateError('unbalanced frontend source delimiters', Diagnostic.FRONTEND_CREATE_SUBJECT)
     if stack or not names or len(names) > MAX_SYMBOLS:
-        raise PolicyError('no bounded supported frontend exports')
+        raise FrontendCreateError('no bounded supported frontend exports', Diagnostic.FRONTEND_CREATE_SUBJECT)
     return sorted(names)
 
 
 def frontend_create_contract(bundle, path, selected_source):
-    contract = frontend_import_contract(bundle, path, selected_source)
     entries = [e for e in bundle.sources if e.path == selected_source
                and e.source_sha == bundle.source.head_sha]
     if (selected_source not in captured_frontend_subjects(bundle) or len(entries) != 1
             or entries[0].category != 'source' or entries[0].state != 'available'
             or entries[0].content is None):
-        raise PolicyError('frontend create subject evidence unavailable')
-    return {**contract, 'available_subject_exports': direct_named_exports(entries[0].content)}
+        raise FrontendCreateError('frontend create subject evidence unavailable', Diagnostic.FRONTEND_CREATE_SUBJECT)
+    exports = direct_named_exports(entries[0].content)
+    subject_import = required_subject_import(path, selected_source)
+    try:
+        packages = captured_package_roots(bundle)
+    except PolicyError:
+        raise FrontendCreateError('frontend create package evidence unavailable',
+                                  Diagnostic.FRONTEND_CREATE_PACKAGE) from None
+    return {'test_path': path, 'selected_source_path': selected_source,
+            'required_subject_import': subject_import, 'allowed_package_roots': packages,
+            'available_subject_exports': exports}
 
 
 def _names(value, allowed=None):
     if (type(value) is not list or not 1 <= len(value) <= MAX_SYMBOLS
             or any(not _name(n) for n in value) or len(set(value)) != len(value)):
-        raise PolicyError('invalid structured import names')
+        raise FrontendCreateError('invalid structured import names', Diagnostic.FRONTEND_CREATE_SHAPE)
     if allowed is not None and any(n not in allowed for n in value):
-        raise PolicyError('subject export outside captured allowlist')
+        raise FrontendCreateError('subject export outside captured allowlist', Diagnostic.FRONTEND_CREATE_SUBJECT)
     return sorted(value)
 
 
 def assemble_frontend_create(value, contract):
     """Independently validate every model field, then emit deterministic bytes."""
     if type(value) is not dict or set(value) != {'subject_imports', 'package_imports', 'test_body'}:
-        raise PolicyError('frontend create fields rejected')
+        raise FrontendCreateError('frontend create fields rejected', Diagnostic.FRONTEND_CREATE_SHAPE)
     subjects = _names(value['subject_imports'], contract['available_subject_exports'])
     packages = value['package_imports']
     if type(packages) is not list or len(packages) > 64:
-        raise PolicyError('structured package import bound')
+        raise FrontendCreateError('structured package import bound', Diagnostic.FRONTEND_CREATE_SHAPE)
     imports, locals_used = {}, set(subjects)
     for item in packages:
         if type(item) is not dict or set(item) != {'module', 'names'}:
-            raise PolicyError('structured package fields rejected')
+            raise FrontendCreateError('structured package fields rejected', Diagnostic.FRONTEND_CREATE_SHAPE)
         module = item['module']
-        if type(module) is not str or module not in contract['allowed_package_roots']:
-            raise PolicyError('package outside captured allowlist')
+        if type(module) is not str:
+            raise FrontendCreateError('structured package module rejected', Diagnostic.FRONTEND_CREATE_SHAPE)
+        if module not in contract['allowed_package_roots']:
+            raise FrontendCreateError('package outside captured allowlist', Diagnostic.FRONTEND_CREATE_PACKAGE)
         names = _names(item['names'])
         if module in imports or locals_used.intersection(names):
-            raise PolicyError('duplicate structured import binding')
+            raise FrontendCreateError('duplicate structured import binding', Diagnostic.FRONTEND_CREATE_SHAPE)
         imports[module] = names
         locals_used.update(names)
     body = value['test_body']
+    if type(body) is not str:
+        raise FrontendCreateError('frontend create body field rejected', Diagnostic.FRONTEND_CREATE_SHAPE)
     tokens = _tokens(body, MAX_BODY_BYTES, for_body=True)
     if any(t in {'import', 'export', 'require', 'eval', 'Function'} for t in tokens) or '```' in body:
-        raise PolicyError('test body import bypass rejected')
+        raise FrontendCreateError('test body import bypass rejected', Diagnostic.FRONTEND_CREATE_BODY)
     lines = ["import { " + ', '.join(subjects) + " } from '" + contract['required_subject_import'] + "'"]
     lines += ["import { " + ', '.join(imports[module]) + " } from '" + module + "'" for module in sorted(imports)]
     return '\n'.join(lines) + '\n\n' + body.strip() + '\n'
