@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 import difflib
+import re
 from pathlib import Path
 
 from automation.benchmarks.scenarios import SCENARIOS
@@ -12,6 +13,7 @@ from automation.test_agent.contracts import Target
 from automation.test_agent.provider import Stage, canonical, digest, strict_json
 from automation.test_agent.repair import language_contract
 from automation.test_agent.import_contract import frontend_import_contract
+from automation.test_agent.frontend_create import frontend_create_contract
 
 
 FRONTEND_CODE = """import { render, screen } from '@testing-library/react'
@@ -117,7 +119,7 @@ def _binding(bundle, stage, target, payload):
     from automation.test_agent.protocol import stage_shape
     return digest(canonical({'source': asdict(bundle.source), 'context_sha256': bundle.sha256,
                              'stage': stage, 'target': target, 'input': payload,
-                             'response_shape_sha256': digest(canonical(stage_shape(stage, target)))}))
+                             'response_shape_sha256': digest(canonical(stage_shape(stage, target, payload)))}))
 
 
 def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
@@ -139,7 +141,7 @@ def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
                      if e['state'] == 'available' and e.get('content') is not None}
         payload = {'decision': decision, 'evidence': projection,
                    'permitted_test_paths': plan['intended_test_files'], 'original_sha256': originals,
-                   **(frontend_import_contract(bundle,
+                   **((frontend_create_contract if decision['action'] == 'generate' else frontend_import_contract)(bundle,
                        plan['intended_test_files'][0], decision['selected_source_path'])
                       if target == Target.FRONTEND else {}),
                    **({'test_operation': 'create' if decision['action'] == 'generate' else 'update'}
@@ -154,8 +156,10 @@ def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
                     if 'health' in path else BACKEND_CODE)
             edits.append({'path': path, 'operation': 'update' if path in originals else 'create',
                           'original_sha256': originals.get(path), 'content': code})
+        fields = (structured_code(edits[0]['content'])
+                  if target == Target.FRONTEND and decision['action'] == 'generate' else {'edits': edits})
         result.append(canonical({'binding': _binding(bundle, Stage.EDITS, target, payload),
-                                 'target': str(target), 'edits': edits}).decode())
+                                 'target': str(target), **fields}).decode())
     return tuple(result)
 
 
@@ -166,3 +170,20 @@ def install_originals(bundle, root):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(evidence.content)
         path.chmod(0o644)
+
+
+def structured_code(content):
+    """Convert only trusted simple fixture imports to the new finite transcript."""
+    subjects, packages, body = [], [], []
+    for line in content.splitlines():
+        match = re.fullmatch(r"import \{ (.+) \} from ['\"]([^'\"]+)['\"];?", line)
+        if match:
+            names = match[1].split(', ')
+            if match[2].startswith('.'):
+                subjects.extend(names)
+            else:
+                packages.append({'module': match[2], 'names': names})
+        else:
+            body.append(line)
+    return {'subject_imports': subjects, 'package_imports': packages,
+            'test_body': '\n'.join(body).strip() + '\n'}

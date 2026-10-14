@@ -8,7 +8,27 @@ def object_schema(properties):
             "additionalProperties": False}
 
 
-def stage_shape(stage, target=None):
+def structured_frontend_create(stage, target, evidence):
+    return (target == 'frontend' and stage in {'edits', 'repair'}
+            and type(evidence) is dict and evidence.get('test_operation') == 'create')
+
+
+def stage_shape(stage, target=None, evidence=None):
+    if structured_frontend_create(stage, target, evidence):
+        return {
+            'subject_imports': {'type': 'array', 'minItems': 1, 'maxItems': 64,
+                                'uniqueItems': True,
+                                'items': {'enum': evidence['available_subject_exports']}},
+            'package_imports': {'type': 'array', 'maxItems': 64 if evidence['allowed_package_roots'] else 0,
+                               'items': object_schema({
+                'module': ({'enum': evidence['allowed_package_roots']} if evidence['allowed_package_roots']
+                           else {'type': 'string', 'maxLength': 0}),
+                'names': {'type': 'array', 'minItems': 1, 'maxItems': 64, 'uniqueItems': True,
+                          'items': {'type': 'string', 'maxLength': 128,
+                                    'pattern': '^[A-Za-z_$][A-Za-z0-9_$]*$'}},
+            })},
+            'test_body': {'type': 'string', 'minLength': 1, 'maxLength': 16384},
+        }
     if stage == "decision":
         return {
             **({"selected_source_path": {"type": ["string", "null"]}}
@@ -31,7 +51,7 @@ def stage_shape(stage, target=None):
 
 
 def stage_schema(stage, target, binding, evidence=None, *, constrain_actions=False):
-    shape = stage_shape(stage, target)
+    shape = stage_shape(stage, target, evidence)
     if stage == "decision" and type(evidence) is dict:
         tests = evidence.get("existing_tests")
         candidates = evidence.get("candidate_tests")

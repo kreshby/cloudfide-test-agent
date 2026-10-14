@@ -75,8 +75,8 @@ def test_edit_request_and_trace_bind_host_import(tmp_path, case, expected_import
             expected = required_subject_import(path, decision["selected_source_path"])
             assert data["required_subject_import"] == expected == expected_import
             assert data["file_language"][path] == {"language": "typescript", "jsx_allowed": True}
-            assert "exactly the host-provided required_subject_import" in request.system
-            assert "actual captured exports/signatures" in request.system
+            assert "host constructs all imports" in request.system
+            assert "available_subject_exports" in request.system
             event = next(json.loads(e) for e in result.trace
                          if json.loads(e)["event"] == "decision-accepted")
             assert event["required_subject_import"] == expected
@@ -86,18 +86,19 @@ def test_edit_request_and_trace_bind_host_import(tmp_path, case, expected_import
             assert "host-provided required_subject_import" not in request.system
 
 
-@pytest.mark.parametrize("location", ["decision", "edits", "edit-item"])
+@pytest.mark.parametrize("location", ["decision", "edits", "package-item"])
 def test_model_cannot_override_host_import(tmp_path, location):
     bundle = bundle_for("frontend-generate")
     replies = list(transcript(bundle))
     index = 0 if location == "decision" else 1
     response = json.loads(replies[index])
-    obj = response["edits"][0] if location == "edit-item" else response
+    obj = response["package_imports"][0] if location == "package-item" else response
     obj["required_subject_import"] = "./neighbor"
     replies[index] = canonical(response).decode()
     provider = FakeProvider(tuple(replies))
     result = UnitTestAgent(bundle, tmp_path, provider).run()
-    assert result.state == State.FAILED and result.diagnostic == Diagnostic.SCHEMA
+    assert result.state == State.FAILED
+    assert result.diagnostic == (Diagnostic.PATH if location == 'package-item' else Diagnostic.SCHEMA)
     if index == 1:
         assert json.loads(provider.requests[1].user)["input"]["required_subject_import"] == "./SubmitButton"
 

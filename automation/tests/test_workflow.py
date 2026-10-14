@@ -400,7 +400,7 @@ def test_expected_pipeline_failures_and_no_edit_keep_truthful_facts(tmp_path, mo
         import json
         replies = list(transcript(bundle))
         edit_response = json.loads(replies[1])
-        edit_response['edits'][0]['content'] = "it.only('bad', () => expect(1).toBe(1))\n"
+        edit_response['test_body'] = "it.only('bad', () => expect(1).toBe(1))\n"
         replies[1] = json.dumps(edit_response)
         provider = FakeProvider(tuple(replies))
     events = []

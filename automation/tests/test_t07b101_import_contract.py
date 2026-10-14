@@ -74,13 +74,13 @@ def test_manifest_authority_is_exact_head_and_fixed_path(mutation):
         with pytest.raises(PolicyError): captured_package_roots(b)
 
 
-@pytest.mark.parametrize('location', ['decision', 'edits', 'edit-item'])
+@pytest.mark.parametrize('location', ['decision', 'edits', 'package-item'])
 def test_model_cannot_expand_manifest_allowlist(tmp_path, location):
     b = bundle_for('frontend-generate')
     responses = list(transcript(b))
     i = 0 if location == 'decision' else 1
     value = json.loads(responses[i])
-    obj = value['edits'][0] if location == 'edit-item' else value
+    obj = value['package_imports'][0] if location == 'package-item' else value
     obj['allowed_package_roots'] = ['@testing-library/react-hooks']
     responses[i] = canonical(value).decode()
     p = FakeProvider(tuple(responses))
@@ -219,6 +219,10 @@ def test_exact_live_regression_and_one_repair(parser_image, tmp_path, replacemen
     assert after['passed'] and after['subject_imported'] and after['categories'] == []
 
     b = live_query_keys_bundle()
+    original = Evidence(TEST, b.source.head_sha, 'f' * 40, 'existing-test',
+        ('named-module-test',), 'available', len(GOOD.encode()), GOOD)
+    b = replace(b, existing_tests=(original,),
+                candidate_tests=(CandidateTest(TEST, ('named-module-test',), True),))
     responses = list(transcript(b, decisions_for(b)))
     value = json.loads(responses[1]); value['edits'][0]['content'] = BAD
     responses[1] = canonical(value).decode()
@@ -239,6 +243,7 @@ def test_exact_live_regression_and_one_repair(parser_image, tmp_path, replacemen
     p.infer = fake
     root = tmp_path/'checkout'; root.mkdir()
     files = {path: v.safe_read(v.TRUSTED_ROOT, path) for path in v.TRUSTED_FILES}
+    files[TEST] = (GOOD.encode(), 0o644)
     files[SUBJECT] = (b.sources[0].content.encode(), 0o644)
     files['frontend/src/base.test.ts'] = (b"import {it,expect} from 'vitest'\nit('base',()=>expect(1).toBe(1))\n", 0o644)
     for path, (content, mode) in files.items():
@@ -278,6 +283,6 @@ def test_exact_live_regression_and_one_repair(parser_image, tmp_path, replacemen
         assert len(p.requests) == 3 and sum(r.stage == Stage.REPAIR for r in p.requests) == 1
         assert a.MAX_FRONTEND_REPAIRS == a.MAX_STAGE_ROUNDS == 1 and a.MAX_PROVIDER_CALLS == 5
         with pytest.raises(a.AgentError): agent.repair(first.compiler_failure)
-        assert len(p.requests) == 3 and not (root/TEST).exists()
+        assert len(p.requests) == 3 and (root/TEST).read_text() == GOOD
     finally:
         for report in reports: shutil.rmtree(report.output_directory)

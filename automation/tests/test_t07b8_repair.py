@@ -19,7 +19,7 @@ from automation.test_agent.provider import FakeProvider, Stage, canonical, diges
 from automation.test_agent.repair import (CompilerDiagnostic, MAX_DIAGNOSTICS, MESSAGES,
                                          compiler_diagnostics, language_contract)
 from automation.test_agent.reporting import AgentRun, bind_evidence
-from automation.tests.t04_fixtures import FRONTEND_CODE, bundle_for, decisions_for, transcript
+from automation.tests.t04_fixtures import FRONTEND_CODE, bundle_for, decisions_for, transcript, structured_code
 from automation.tests.test_verification import FakeExecutor, capture
 from automation.tests.test_workflow import gate_reader, pre_for
 
@@ -36,8 +36,10 @@ class RepairProvider(FakeProvider):
         assert 0 < timeout <= a.MAX_CALL_SECONDS
         self.requests.append(request)
         prior = json.loads(request.user)["input"]["previous_content"]
-        return canonical(self.change({"binding": request.binding, "target": "frontend",
-                                      "replacement_content": prior + "\n// syntax repaired\n"})).decode()
+        data = json.loads(request.user)['input']
+        fields = (structured_code(prior + "\n// syntax repaired\n") if data['test_operation'] == 'create'
+                  else {'replacement_content': prior + "\n// syntax repaired\n"})
+        return canonical(self.change({'binding': request.binding, 'target': 'frontend', **fields})).decode()
 
 
 class CompilerExecutor(FakeExecutor):
@@ -136,7 +138,7 @@ def test_one_bound_replacement_then_fresh_verification_and_tests(rig):
     assert data["verification_sha256"] == feedback.verification_sha256
     assert payload["source"] == asdict(bundle.source) and payload["context_sha256"] == bundle.sha256
     assert request.response_schema["additionalProperties"] is False
-    assert set(request.response_schema["required"]) == {"binding", "target", "replacement_content"}
+    assert set(request.response_schema["required"]) == {"binding", "target", "subject_imports", "package_imports", "test_body"}
     assert "no application source" in request.system and "jsx_allowed=false" in request.system
     assert "UNTRUSTED" not in request.user and "stdout" not in request.user
     executor.fail_step = None
@@ -156,12 +158,12 @@ def test_one_bound_replacement_then_fresh_verification_and_tests(rig):
     lambda x: {**x, "edits": []},
     lambda x: {**x, "binding": "0" * 64},
     lambda x: {**x, "target": "backend"},
-    lambda x: {**x, "replacement_content": ""},
-    lambda x: {**x, "replacement_content": None},
-    lambda x: {**x, "replacement_content": "```ts\n" + x["replacement_content"]},
-    lambda x: {**x, "replacement_content": x["replacement_content"].replace("it(", "it.skip(")},
-    lambda x: {**x, "replacement_content": "it('empty',()=>{})"},
-    lambda x: {**x, "replacement_content": x["replacement_content"].split("  rerender(")[0] + "})\n"},
+    lambda x: {**x, "test_body": ""},
+    lambda x: {**x, "test_body": None},
+    lambda x: {**x, "test_body": "```ts\n" + x["test_body"]},
+    lambda x: {**x, "test_body": x["test_body"].replace("it(", "it.skip(")},
+    lambda x: {**x, "test_body": "it('empty',()=>{})"},
+    lambda x: {**x, "test_body": x["test_body"].split("  rerender(")[0] + "})\n"},
 ])
 def test_repair_output_cannot_expand_authority_or_weaken_tests(rig, change):
     _, root, _, provider, agent, _ = rig

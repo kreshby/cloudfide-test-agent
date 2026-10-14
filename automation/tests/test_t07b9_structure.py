@@ -15,7 +15,7 @@ from automation.test_agent.provider import FakeProvider, Stage, canonical, diges
 from automation.test_agent.skills import MAX_SKILL_BYTES, REGISTRY, load_skill
 from automation.test_agent.context import CandidateTest
 from automation.test_agent.subjects import captured_frontend_subjects
-from automation.tests.t04_fixtures import bundle_for, decisions_for, install_originals, transcript
+from automation.tests.t04_fixtures import bundle_for, decisions_for, install_originals, transcript, structured_code
 from automation.tests.test_t07b8_repair import rig, failing, CompilerExecutor
 from automation.tests.test_verification import capture
 
@@ -101,7 +101,7 @@ def test_edit_cannot_switch_subject_field(tmp_path):
 def test_identical_repair_terminal_without_second_verifier(rig):
     _,_,executor,provider,agent,verify=rig
     evidence=failing(rig);count=len(executor.started)
-    provider.change=lambda value:{**value,'replacement_content':json.loads(provider.requests[-1].user)['input']['previous_content']}
+    provider.change=lambda value:{**value, **structured_code(json.loads(provider.requests[-1].user)['input']['previous_content'])}
     result=agent.repair(evidence.compiler_failure)
     assert result.state==State.FAILED and result.provider_calls==3
     assert len(executor.started)==count
@@ -265,9 +265,8 @@ def test_unsafe_import_still_blocks_with_direct_subject(parser_image, tmp_path, 
 @pytest.mark.parametrize('failure',['jsx','unsafe','subject'])
 def test_actual_repaired_content_preserves_hard_gates_and_advisory_import(parser_image,tmp_path,failure):
     bundle=bundle_for('already-covered')
-    bundle=replace(bundle,source=replace(bundle.source,run_id=str(bundle.workflow.run_id)),existing_tests=(),
-                   candidate_tests=(CandidateTest('frontend/src/clamp.test.ts',('named-module-test',),False),))
-    responses=list(transcript(bundle,decisions_for(bundle,{'frontend':'generate'})))
+    bundle=replace(bundle,source=replace(bundle.source,run_id=str(bundle.workflow.run_id)))
+    responses=list(transcript(bundle,decisions_for(bundle,{'frontend':'update'})))
     initial_code=PURE.replace('value','clamp').replace('./subject','./clamp')
     value=json.loads(responses[1]);value['edits'][0]['content']=initial_code;responses[1]=canonical(value).decode()
     # Finite trusted fixture provider, retaining the existing one-shot repair.
@@ -283,6 +282,7 @@ def test_actual_repaired_content_preserves_hard_gates_and_advisory_import(parser
     root=tmp_path/'checkout';root.mkdir()
     files={p:v.safe_read(v.TRUSTED_ROOT,p) for p in v.TRUSTED_FILES}
     files.update({e.path:(e.content.encode(),0o644) for e in bundle.sources})
+    files.update({e.path:(e.content.encode(),0o644) for e in bundle.existing_tests})
     files['frontend/src/base.test.ts']=(b"import {it,expect} from 'vitest'\nit('base',()=>expect(1).toBe(1))\n",0o644)
     for p,(data,mode) in files.items():
         dest=root/p;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data);dest.chmod(mode)

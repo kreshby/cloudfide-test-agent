@@ -15,9 +15,10 @@ from .provider import (COMPLETION_TOKENS, MAX_CALL_SECONDS, RESPONSE_LIMITS, Pro
                        ProviderError, ProviderRequest, Stage, canonical, digest, strict_json)
 from .skills import SkillError, load_skill
 from .diagnostics import Diagnostic, safe_diagnostic
-from .protocol import MAX_INTENDED_TEST_FILES, stage_schema, stage_shape
+from .protocol import MAX_INTENDED_TEST_FILES, stage_schema, stage_shape, structured_frontend_create
 from .subjects import captured_frontend_subjects, required_subject_import
 from .import_contract import frontend_import_contract
+from .frontend_create import frontend_create_contract, assemble_frontend_create
 
 
 MAX_PROVIDER_CALLS = 5
@@ -349,20 +350,31 @@ class UnitTestAgent:
         if (stage, target) in self._rounds:
             raise AgentError("stage round budget exhausted")
         loaded = tuple(load_skill(identifier, target) for identifier in skill_ids)
+        structured = structured_frontend_create(stage, target, payload)
         payload = {"source": asdict(self._bundle.source), "context_sha256": self._context_digest,
                    "stage": stage, "target": target, "input": payload,
-                   "response_shape_sha256": digest(canonical(stage_shape(stage, target)))}
+                   "response_shape_sha256": digest(canonical(stage_shape(stage, target, payload)))}
         binding = digest(canonical(payload))
         payload["binding"] = binding
         response_schema = stage_schema(stage, target, binding, payload["input"])
-        system = UNIT_TEST_AGENT + "\n" + "\n".join(s.body for s in loaded) + (
+        system = (UNIT_TEST_AGENT.replace('Return complete file contents without code fences.',
+                  'For frontend create return structured imports and test_body without code fences.')
+                  if structured else UNIT_TEST_AGENT) + "\n" + "\n".join(s.body for s in loaded) + (
+            "\nFrontend create: choose subject_imports only from available_subject_exports, "
+            "package_imports only from allowed_package_roots, and test_body containing assertions. "
+            "The host constructs all imports; test_body must contain no import/export, require, "
+            "dynamic import, eval or Function. Use ordinary quoted strings, no templates.\n"
+            if structured else "") + (
             "\nDo not invent npm packages; use only allowed_package_roots. Relative imports "
             "must resolve from test_path. When directly importing selected_source_path, use "
             "exactly the host-provided required_subject_import module specifier and actual captured exports/signatures. "
             "Prefer directly testing a plain exported object/function over hook infrastructure "
             "when the selected source is plain data/API. Valid indirect behavior tests are allowed.\n"
-            if stage == Stage.EDITS and target == Target.FRONTEND else "") + (
-            REPAIR_INSTRUCTIONS if stage == Stage.REPAIR else "") + (
+            if stage == Stage.EDITS and target == Target.FRONTEND and not structured else "") + (
+            (REPAIR_INSTRUCTIONS.replace('Return COMPLETE replacement file content.',
+                 'Return the same structured create fields; the host rebuilds the replacement.').replace(
+                 'Return the complete replacement file only.', 'Return structured imports and test_body only.')
+             if structured else REPAIR_INSTRUCTIONS) if stage == Stage.REPAIR else "") + (
             "\nResponse JSON schema (all fields required; no extra fields):\n" +
             canonical(response_schema).decode())
         request = ProviderRequest(stage, target, binding, system, canonical(payload).decode())
@@ -461,7 +473,8 @@ class UnitTestAgent:
                     edit_response = self._ask(Stage.EDITS, target, {
                         "decision": asdict(decision), "evidence": edit_projection,
                         "permitted_test_paths": list(plan.intended_test_files), "original_sha256": originals,
-                        **(frontend_import_contract(self._bundle,
+                        **((frontend_create_contract if decision.action == ModelAction.GENERATE
+                            else frontend_import_contract)(self._bundle,
                             plan.intended_test_files[0], decision.selected_source_path)
                            if target == Target.FRONTEND else {}),
                         **({"test_operation": "create" if decision.action == ModelAction.GENERATE else "update"}
@@ -469,12 +482,16 @@ class UnitTestAgent:
                         **({"file_language": {p: language_contract(p) for p in plan.intended_test_files}}
                            if target == Target.FRONTEND else {}),
                     }, (target_skill,))
-                    if (type(edit_response["edits"]) is not list
-                            or not 1 <= len(edit_response["edits"]) <= MAX_EDITED_FILES):
-                        raise AgentError("edit stage count limit", diagnostic=Diagnostic.SCHEMA)
-                    for item in edit_response["edits"]:
-                        _fields(item, ("path", "operation", "original_sha256", "content"))
-                        edits.append(ProposedEdit.from_mapping({**item, "target": str(target)}))
+                    if target == Target.FRONTEND and decision.action == ModelAction.GENERATE:
+                        contract = frontend_create_contract(self._bundle, plan.intended_test_files[0],
+                                                            decision.selected_source_path)
+                        content = assemble_frontend_create({k: edit_response[k] for k in (
+                            'subject_imports', 'package_imports', 'test_body')}, contract)
+                        edits.append(ProposedEdit.from_mapping({
+                            'target': str(target), 'path': plan.intended_test_files[0],
+                            'operation': 'create', 'original_sha256': None, 'content': content}))
+                    else:
+                        self._append_edits(edit_response, target, edits)
                     if index + 1 < len(targets):
                         self._transition(State.DECIDING)
                 decisions.append(decision)
@@ -497,6 +514,14 @@ class UnitTestAgent:
         finally:
             self._active_seconds += self._clock() - started
         return self.result()
+
+    def _append_edits(self, edit_response, target, edits):
+        if (type(edit_response["edits"]) is not list
+                or not 1 <= len(edit_response["edits"]) <= MAX_EDITED_FILES):
+            raise AgentError("edit stage count limit", diagnostic=Diagnostic.SCHEMA)
+        for item in edit_response["edits"]:
+            _fields(item, ("path", "operation", "original_sha256", "content"))
+            edits.append(ProposedEdit.from_mapping({**item, "target": str(target)}))
 
     def resume(self, feedback: HostResult):
         if self._state != State.AWAITING_VERIFICATION:
@@ -563,11 +588,15 @@ class UnitTestAgent:
                 "diagnostics_sha256": feedback.sha256,
                 "diagnostics": [asdict(d) for d in feedback.diagnostics],
                 **language_contract(previous.path),
-                **frontend_import_contract(self._bundle, previous.path, decision.selected_source_path),
+                **((frontend_create_contract if previous.operation == 'create' else frontend_import_contract)(
+                    self._bundle, previous.path, decision.selected_source_path)),
                 "evidence": self._projection(Target.FRONTEND, [previous.path], decision.selected_source_path),
                 "decision": asdict(decision),
             }, ("frontend-unit-tests",))
-            content = response["replacement_content"]
+            content = (assemble_frontend_create({k: response[k] for k in (
+                'subject_imports', 'package_imports', 'test_body')}, frontend_create_contract(
+                    self._bundle, previous.path, decision.selected_source_path))
+                if previous.operation == 'create' else response["replacement_content"])
             if type(content) is not str or not content.strip() or "```" in content:
                 raise AgentError("repair replacement content rejected", diagnostic=Diagnostic.SCHEMA)
             if digest(content.encode()) == feedback.previous_content_sha256:
