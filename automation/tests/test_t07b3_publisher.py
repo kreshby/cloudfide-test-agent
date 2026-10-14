@@ -13,7 +13,7 @@ from automation.tests.t07b2_fixtures import LiveReadAPI, live_handoff
 from automation.tests.t07b3_fixtures import WireAPI
 
 
-def setup(monkeypatch, *, fault=None, close=True, framing="length", patch=False):
+def setup(monkeypatch, *, fault=None, close=True, framing="length", patch=False, response_headers=()):
     prepared = report(json.loads(live_handoff()))
     pr = LiveReadAPI().pr
     writes = []
@@ -40,7 +40,7 @@ def setup(monkeypatch, *, fault=None, close=True, framing="length", patch=False)
         if fault == "patch-id":
             receipt["id"] = 501
         return (200 if method == "PATCH" else 201), receipt
-    api = WireAPI(reply, close=close, framing=framing)
+    api = WireAPI(reply, close=close, framing=framing, response_headers=response_headers)
     # Route only the trusted fixed host to a local socket. Production request,
     # HTTPResponse, response loop, adapter validation and publication are real.
     factory = http.client.HTTPConnection
@@ -110,3 +110,75 @@ def test_real_socket_write_failure_has_fixed_category_and_no_retry(monkeypatch, 
     assert caught.value.phase == "publisher-write-" + category
     assert "PRIVATE_REMOTE_RESPONSE" not in str(caught.value)
     assert len(writes) == 1
+
+
+@pytest.mark.parametrize("headers,category", [
+    ((), "http-403"),
+    ((("Retry-After", "60"),), "rate-limited"),
+    ((("Retry-After", "9999999999"),), "rate-limited"),
+    ((("Retry-After", "Wed, 14 Oct 2026 12:00:00 GMT"),), "rate-limited"),
+    ((("X-RateLimit-Remaining", "0"),), "rate-limited"),
+    ((("X-Accepted-GitHub-Permissions", "issues=write; pull_requests=write"),), "permission-denied"),
+    ((("X-Accepted-GitHub-Permissions", "PRIVATE_HEADER_VALUE"),), "permission-denied"),
+    ((("X-Accepted-GitHub-Permissions", "x" * 256),), "permission-denied"),
+    ((("Retry-After", "60"), ("X-Accepted-GitHub-Permissions", "issues=write")), "rate-limited"),
+    ((("X-RateLimit-Remaining", "0"), ("X-Accepted-GitHub-Permissions", "issues=write")), "rate-limited"),
+    ((("Retry-After", "PRIVATE_HEADER_VALUE"), ("X-Accepted-GitHub-Permissions", "issues=write")), "permission-denied"),
+    ((("Retry-After", "10000000000"),), "http-403"),
+    ((("Retry-After", "PRIVATE_HEADER_VALUE"),), "http-403"),
+    ((("Retry-After", ""),), "http-403"),
+    ((("X-RateLimit-Remaining", "00"),), "http-403"),
+    ((("X-RateLimit-Remaining", "1"),), "http-403"),
+    ((("X-Accepted-GitHub-Permissions", "PRIVATE_HEADER_VALUE" * 20),), "http-403"),
+    ((("X-Accepted-GitHub-Permissions", ""),), "http-403"),
+    ((("X-Accepted-GitHub-Permissions", "private\tvalue"),), "http-403"),
+    ((("X-Private-Header", "PRIVATE_HEADER_VALUE"),), "http-403"),
+])
+@pytest.mark.parametrize("patch", [False, True])
+def test_real_socket_403_bounded_headers_no_leak_or_retry(monkeypatch, capsys, headers, category, patch):
+    api, prepared, writes, local_port = setup(monkeypatch, fault=403, patch=patch, response_headers=headers)
+    with api.serve() as server_port:
+        local_port.append(server_port)
+        adapter = p.GitHubPublisherAdapter(REPOSITORY, p.GitHubPublisherHTTPTransport(REPOSITORY))
+        with pytest.raises(p.PublicationError) as caught:
+            p.publish(prepared, adapter, EXPECTED_AUTHOR)
+    expected = "publisher-write-" + category
+    assert caught.value.phase == str(caught.value) == expected
+    assert expected in p.WRITE_PHASES
+    assert writes == ["PATCH" if patch else "POST"]
+    assert [m for m, _, _ in api.operations] == ["GET", "GET", "GET", writes[0]]
+    output = capsys.readouterr()
+    exposed = str(caught.value) + repr(caught.value) + output.out + output.err
+    assert "PRIVATE_REMOTE_RESPONSE" not in exposed
+    assert "PRIVATE_HEADER_VALUE" not in exposed
+    assert output.out == output.err == ""
+
+
+@pytest.mark.parametrize("status,category", [(401, "http-401"), (404, "http-404"),
+                                           (422, "http-422"), (503, "http-5xx")])
+def test_diagnostic_headers_leave_other_write_statuses_unchanged(monkeypatch, status, category):
+    api, prepared, writes, local_port = setup(monkeypatch, fault=status, response_headers=(
+        ("Retry-After", "60"), ("X-RateLimit-Remaining", "0"),
+        ("X-Accepted-GitHub-Permissions", "issues=write")))
+    with api.serve() as server_port:
+        local_port.append(server_port)
+        adapter = p.GitHubPublisherAdapter(REPOSITORY, p.GitHubPublisherHTTPTransport(REPOSITORY))
+        with pytest.raises(p.PublicationError) as caught:
+            p.publish(prepared, adapter, EXPECTED_AUTHOR)
+    assert caught.value.phase == str(caught.value) == "publisher-write-" + category
+    assert writes == ["POST"]
+
+
+def test_read_403_does_not_consult_write_diagnostic_headers(monkeypatch):
+    class ReadResponse:
+        status = 403
+        def getheader(self, *_):
+            pytest.fail("read error must not inspect diagnostic headers")
+    api, _, writes, local_port = setup(monkeypatch)
+    monkeypatch.setattr(p.http.client.HTTPConnection, "getresponse", lambda _: ReadResponse())
+    with api.serve() as server_port:
+        local_port.append(server_port)
+        with pytest.raises(p.PublicationError) as caught:
+            p.GitHubPublisherHTTPTransport(REPOSITORY).request("GET", "/repos/" + REPOSITORY + "/pulls/2")
+    assert caught.value.phase == "publisher-read-unavailable"
+    assert writes == []

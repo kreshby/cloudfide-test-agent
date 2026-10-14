@@ -22,7 +22,7 @@ from .subjects import captured_frontend_subjects, required_subject_import
 MAX_PROVIDER_CALLS = 5
 MAX_STAGE_ROUNDS = 1  # Per (stage, target), including the single frontend repair.
 MAX_FRONTEND_REPAIRS = 1
-MAX_ACTIVE_SECONDS = 1000
+MAX_ACTIVE_SECONDS = 1800
 MAX_PROJECTION_BYTES = 16 * 1024
 MAX_TRACE_EVENTS = 48
 MAX_TRACE_BYTES = 64 * 1024

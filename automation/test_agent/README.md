@@ -374,8 +374,8 @@ Limits are trusted constants, never stage payload options:
 | Resource | Bound |
 | --- | --- |
 | Targets / inference calls / rounds per stage per target | 2 / 5 / 1 |
-| Active agent wall time, accumulated across run/resume | 1,000 seconds |
-| Each inference including formatting/tokenization | 300 seconds or remaining active budget |
+| Active agent wall time, accumulated across run/resume | 1,800 seconds |
+| Each inference including formatting/tokenization | 600 seconds or remaining active budget |
 | Decision / edits / repair completion tokens | 256 / 768 / 768 |
 | Decision / edits / repair raw response | 4 / 16 / 16 KiB |
 | Canonical provider request / target projection | 24 / 16 KiB |
@@ -385,7 +385,34 @@ Limits are trusted constants, never stage payload options:
 | Trace events / trace bytes | 48 / 64 KiB |
 | Trusted verification records | 8 |
 
-These are ceilings, not performance measurements. P01's CPU evidence motivates
+These are ceilings, not performance measurements.
+
+Local GGUF inference on a standard CPU-only GitHub-hosted runner may be slow.
+The 600-second per-call hard ceiling and 1,800-second active execution ceiling
+are bounded demo ceilings, not expected latency targets. Production use requires
+measured performance and likely faster or self-hosted inference infrastructure.
+The workflow records bounded inference timing evidence to make that tradeoff
+observable, using fixed-key JSON lines in the trusted prepare step's stdout.
+
+Each attempted inference records `call_elapsed_ms` from host monotonic time
+when available, including failures. Completion responses can additionally
+record `prompt_tokens` (`tokens_evaluated`, falling back to `timings.prompt_n`),
+`completion_tokens` (`tokens_predicted`), `prompt_ms`, `generation_ms`
+(`timings.predicted_ms`), `prompt_tokens_per_second` (`timings.prompt_per_second`),
+and `generation_tokens_per_second` (`timings.predicted_per_second`). Token counts
+must be integers bounded by 8,192 or the stage's completion cap; server times
+must be finite numbers in 0–600,000 ms and rates in 0–1,000,000 tokens/second.
+Host call elapsed evidence is bounded by 1,800,000 ms to allow observing deadline
+and cleanup overhead without changing any execution deadline. Each server start
+also records `model_startup_ms` (0–90,000 ms, excluding build/download) and
+`runner_cpu_count` (integer 1–4,096 from `os.cpu_count()`) when available.
+Missing, malformed, negative, non-finite or oversized measurements are omitted;
+logging failures do not affect inference or lifecycle decisions. These records
+contain only fixed event labels and numeric evidence, never prompts, generated
+content, repository text, arbitrary server fields, errors, auth tokens or credentials.
+They are workflow log evidence; the handoff and upload allowlists are unchanged.
+
+P01's CPU evidence motivates
 smaller decision completions and separate targets; 768-token edits/repairs may
 still time out and are not retried. Human/verifier wait time is excluded from
 the active agent budget, which is preserved when resuming the same instance.
@@ -947,7 +974,7 @@ absolute deadline with 10-second socket inactivity bounds. Setup is limited to
 420 seconds, each startup to 90 seconds, source checkout to 120 seconds and the
 host preparation to 2,640 seconds. Existing T03, T04 and T05 limits are unchanged:
 GitHub reads use 10-second requests and the existing request/byte budgets; T04
-allows six calls, 300 seconds per call and 1,000 active seconds overall; T05 limits
+allows six calls, 600 seconds per call and 1,800 active seconds overall; T05 limits
 image build to 600 seconds and each tool to 120 seconds.
 
 The loopback server uses port 8765, CPU only, four threads, context 8192, parallel
@@ -1048,8 +1075,8 @@ of measured headroom while retaining the 2 KiB response and 512-byte text gates.
 A measured exact PR #2 run used 6,495/4,727/4,389/3,160 prompt tokens and
 222/330/177/690 generated tokens for frontend decision/edit and backend
 decision/edit. All ended with EOS. Its longest call took 223.388 seconds and its
-four calls took 717.298 seconds. The fixed 300-second call deadline provides
-about 34% headroom; 1,000 active seconds reserves time for both verification
+four calls took 717.298 seconds. The then-enforced 300-second call deadline provided
+about 34% headroom; the then-enforced 1,000 active seconds reserved time for both verification
 reviews and normal variation. Absolute deadlines and the six-call/no-retry
 limits remain enforced. These measurements are local, not GitHub run results.
 

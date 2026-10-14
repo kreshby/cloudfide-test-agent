@@ -49,7 +49,7 @@ def test_trust_zones_minimal_job_permissions_and_public_runner_guard():
     assert 'needs: prepare' in graph['publisher']
     assert mapping(graph['prepare'], 'permissions', 4) == ['actions: read', 'contents: read', 'pull-requests: read']
     assert mapping(graph['publisher'], 'permissions', 4) == ['contents: read', 'actions: read', 'pull-requests: read', 'issues: write']
-    assert 'contents: write' not in text and 'pull-requests: write' not in text
+    assert 'contents: write' not in text and 'actions: write' not in text and 'pull-requests: write' not in text
     assert text.count('issues: write') == 1
     for body in graph.values():
         assert re.findall(r'^    runs-on: (.+)$', body, re.M) == ['ubuntu-24.04']

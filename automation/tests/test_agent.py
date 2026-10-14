@@ -361,6 +361,8 @@ def test_both_targets_with_edits_use_exactly_four_model_calls(tmp_path):
 
 
 def test_wall_and_per_call_time_budgets(tmp_path):
+    assert module.MAX_ACTIVE_SECONDS == 1800
+    assert module.MAX_CALL_SECONDS == 600
     class Clock:
         now = 0.0
         def __call__(self):
@@ -370,15 +372,34 @@ def test_wall_and_per_call_time_budgets(tmp_path):
     original = provider.infer
     def late(request, timeout):
         response = original(request, timeout)
-        assert timeout <= module.MAX_CALL_SECONDS
+        assert timeout == 600
         clock.now += module.MAX_CALL_SECONDS + 1
         return response
     provider.infer = late
-    assert agent.run().failure == 'provider call timeout exceeded'
+    result = agent.run()
+    assert result.state == State.FAILED
+    assert result.failure == 'provider call timeout exceeded'
+    assert len(provider.requests) == 1
     _, provider, agent = make_agent(tmp_path, clock=clock)
     agent._active_seconds = module.MAX_ACTIVE_SECONDS
-    assert agent.run().failure == 'active wall-time budget exhausted'
+    result = agent.run()
+    assert result.state == State.FAILED
+    assert result.failure == 'active wall-time budget exhausted'
     assert provider.requests == []
+
+    _, provider, agent = make_agent(tmp_path, clock=clock)
+    agent._active_seconds = module.MAX_ACTIVE_SECONDS - 25
+    original = provider.infer
+    def exhaust(request, timeout):
+        assert timeout == 25
+        response = original(request, timeout)
+        clock.now += timeout
+        return response
+    provider.infer = exhaust
+    result = agent.run()
+    assert result.state == State.FAILED
+    assert result.failure == 'active wall-time budget exhausted'
+    assert len(provider.requests) == 1
 
 
 def test_host_wait_excluded_but_active_budget_preserved_on_resume(tmp_path):
@@ -604,8 +625,9 @@ def test_loaded_registry_path_traversal_fails_even_if_host_entry_is_corrupt(monk
 def test_agent_budget_constants_and_no_executable_capabilities():
     assert module.MAX_PROVIDER_CALLS == 5
     assert module.MAX_STAGE_ROUNDS == 1
-    assert module.MAX_ACTIVE_SECONDS == 1000
-    assert module.MAX_CALL_SECONDS == 300
+    assert module.MAX_ACTIVE_SECONDS == 1800
+    assert module.MAX_CALL_SECONDS == 600
+    assert module.MAX_FRONTEND_REPAIRS == 1
     assert module.COMPLETION_TOKENS == {Stage.DECISION: 256, Stage.EDITS: 768, Stage.REPAIR: 768}
     root = Path(module.__file__).parent
     forbidden_imports = {'subprocess', 'importlib', 'pickle', 'shutil'}

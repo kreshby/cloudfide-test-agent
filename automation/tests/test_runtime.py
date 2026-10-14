@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import io
+import json
 from pathlib import Path
 import signal
 from types import SimpleNamespace
@@ -232,3 +233,71 @@ def test_started_server_health_timeout_stops_group_and_temp_data(monkeypatch):
     with pytest.raises(r.RuntimeUnavailable): runtime.__enter__()
     assert events == ['build', 'acquire', 'start', 'stop-group']
     assert runtime.root is None and runtime.server is None
+
+
+def test_lifecycle_records_bounded_host_startup_and_cpu_count(monkeypatch, capsys):
+    events = runtime_fakes(monkeypatch)
+    clock = {'now': 0.0}
+    monkeypatch.setattr(r.time, 'monotonic', lambda: clock['now'])
+    monkeypatch.setattr(r.os, 'cpu_count', lambda: 4)
+    def ready(_):
+        clock['now'] += 2
+        return True
+    monkeypatch.setattr(r, 'health', ready)
+    monkeypatch.setenv('GITHUB_TOKEN', 'PRIVATE_AUTH_FIXTURE')
+    with r.LocalRuntime() as runtime:
+        runtime.stop()
+        runtime.start()
+    output = capsys.readouterr()
+    assert [json.loads(line) for line in output.out.splitlines()] == [
+        {'event': 'runtime_timing', 'model_startup_ms': 2000.0, 'runner_cpu_count': 4},
+    ] * 2
+    assert 'PRIVATE_AUTH_FIXTURE' not in output.out + output.err
+    assert output.err == ''
+    assert events == ['build', 'acquire', 'start', 'stop-group', 'start', 'stop-group']
+
+
+@pytest.mark.parametrize('cpus,expected', [(1, 1), (4096, 4096), (None, None), (True, None),
+                                        (0, None), (-1, None), (4097, None), (2.0, None),
+                                        ('PRIVATE_HOST_VALUE', None), (10**100, None)])
+def test_cpu_count_is_optional_bounded_integer(monkeypatch, capsys, cpus, expected):
+    monkeypatch.setattr(r.time, 'monotonic', lambda: 1.0)
+    monkeypatch.setattr(r.os, 'cpu_count', lambda: cpus)
+    r._record_startup_timing(0.0)
+    metrics = json.loads(capsys.readouterr().out)
+    assert metrics == {'event': 'runtime_timing', 'model_startup_ms': 1000.0,
+                       **({'runner_cpu_count': expected} if expected is not None else {})}
+
+
+@pytest.mark.parametrize('elapsed', [0, 90, 90.001, -1, float('inf'), float('nan')])
+def test_startup_timing_is_optional_bounded_host_number(monkeypatch, capsys, elapsed):
+    monkeypatch.setattr(r.time, 'monotonic', lambda: elapsed)
+    monkeypatch.setattr(r.os, 'cpu_count', lambda: 4)
+    r._record_startup_timing(0.0)
+    metrics = json.loads(capsys.readouterr().out)
+    expected = {'event': 'runtime_timing', 'runner_cpu_count': 4}
+    if elapsed in (0, 90):
+        expected['model_startup_ms'] = elapsed * 1000
+    assert metrics == expected
+
+
+def test_unavailable_cpu_count_keeps_startup_timing_and_no_exception_text(monkeypatch, capsys):
+    monkeypatch.setattr(r.time, 'monotonic', lambda: 1.0)
+    def unavailable():
+        raise OSError('PRIVATE_CPU_FAILURE')
+    monkeypatch.setattr(r.os, 'cpu_count', unavailable)
+    r._record_startup_timing(0.0)
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {'event': 'runtime_timing', 'model_startup_ms': 1000.0}
+    assert 'PRIVATE_CPU_FAILURE' not in output.out + output.err
+
+
+def test_logging_failure_does_not_change_runtime_lifecycle(monkeypatch):
+    events = runtime_fakes(monkeypatch)
+    monkeypatch.setattr(r.time, 'monotonic', lambda: 0.0)
+    def unavailable(*_):
+        raise OSError('PRIVATE_OUTPUT_FAILURE')
+    monkeypatch.setattr(r, 'print', unavailable, raising=False)
+    with r.LocalRuntime() as runtime:
+        assert runtime.provider._port == 8765
+    assert events == ['build', 'acquire', 'start', 'stop-group']

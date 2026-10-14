@@ -33,7 +33,7 @@ class RepairProvider(FakeProvider):
     def infer(self, request, timeout):
         if request.stage != Stage.REPAIR:
             return super().infer(request, timeout)
-        assert 0 < timeout <= 300
+        assert 0 < timeout <= a.MAX_CALL_SECONDS
         self.requests.append(request)
         prior = json.loads(request.user)["input"]["previous_content"]
         return canonical(self.change({"binding": request.binding, "target": "frontend",

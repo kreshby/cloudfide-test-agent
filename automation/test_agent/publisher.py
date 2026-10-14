@@ -28,13 +28,26 @@ PAGE_SIZE = 30
 MAX_COMMENTS = 100
 MAX_REMOTE_COMMENT_BYTES = 64 * 1024
 WRITE_PHASES = frozenset({"publisher-write-http-401", "publisher-write-http-403",
+                         "publisher-write-rate-limited", "publisher-write-permission-denied",
                          "publisher-write-http-404", "publisher-write-http-422",
                          "publisher-write-http-5xx", "publisher-write-http-other",
                          "publisher-write-transport", "publisher-write-json",
                          "publisher-write-receipt", "publisher-write-timeout"})
 
 
-def _write_http(status):
+def _write_http(status, response=None):
+    if type(status) is int and status == 403 and response is not None:
+        retry = response.getheader("Retry-After")
+        # Accept bounded delta-seconds or the fixed IMF-fixdate HTTP-date form.
+        if (type(retry) is str and re.fullmatch(
+                r"(?:[0-9]{1,10}|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} "
+                r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                r"[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT)", retry) is not None
+                or response.getheader("X-RateLimit-Remaining") == "0"):
+            return "publisher-write-rate-limited"
+        permissions = response.getheader("X-Accepted-GitHub-Permissions")
+        if type(permissions) is str and re.fullmatch(r"[ -~]{1,256}", permissions) is not None:
+            return "publisher-write-permission-denied"
     if type(status) is int and status in {401, 403, 404, 422}:
         return f"publisher-write-http-{status}"
     return "publisher-write-http-5xx" if type(status) is int and 500 <= status <= 599 else "publisher-write-http-other"
@@ -212,8 +225,8 @@ class GitHubPublisherHTTPTransport:
             if response.status == 404 and method == "GET" and "/pulls/" in path:
                 return Response(404, b"")
             if response.status != expected:
-                raise PublicationError("GitHub publisher request failed",
-                                       phase=_write_http(response.status) if write else "publisher-read-unavailable")
+                category = _write_http(response.status, response) if write else "publisher-read-unavailable"
+                raise PublicationError(category, phase=category)
             if response.getheader("Content-Encoding", "identity") != "identity":
                 raise PublicationError("unsupported publisher response encoding")
             length = response.getheader("Content-Length")

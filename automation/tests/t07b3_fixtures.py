@@ -9,10 +9,11 @@ from automation.test_agent.provider import canonical
 
 
 class WireAPI:
-    def __init__(self, reply, *, framing="length", close=True, extra_length=0, delay=0):
+    def __init__(self, reply, *, framing="length", close=True, extra_length=0, delay=0, response_headers=()):
         self.reply = reply
         self.framing, self.close = framing, close
         self.extra_length, self.delay = extra_length, delay
+        self.response_headers = response_headers
         self.operations = []
 
     @contextmanager
@@ -34,6 +35,8 @@ class WireAPI:
                     return  # Close the real socket without any response headers.
                 data = value if type(value) is bytes else canonical(value)
                 wire = f"HTTP/1.1 {status} Fixture\r\nConnection: {'close' if api.close else 'keep-alive'}\r\n".encode()
+                for key, value in api.response_headers:
+                    wire += f"{key}: {value}\r\n".encode("ascii")
                 if api.framing == "length":
                     wire += f"Content-Length: {len(data) + api.extra_length}\r\n\r\n".encode() + data
                 elif api.framing == "chunked":

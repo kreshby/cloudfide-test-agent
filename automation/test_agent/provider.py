@@ -21,7 +21,7 @@ from .protocol import stage_schema
 MAX_REQUEST_BYTES = 24 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_HTTP_BYTES = 128 * 1024
-MAX_CALL_SECONDS = 300
+MAX_CALL_SECONDS = 600
 CONTEXT_TOKENS = 8192
 LLAMA_COMMIT = "d81235049384534c167caea52b85a694f6103d14"
 
@@ -153,6 +153,51 @@ def _validate_call(request, timeout):
         raise ProviderError("invalid provider timeout")
 
 
+def _timing_number(value, maximum, *, integer=False):
+    # Exact builtin types exclude booleans; the range rejects NaN/infinity and
+    # huge integers without converting them to floats or serializing them.
+    if type(value) in ((int,) if integer else (int, float)) and 0 <= value <= maximum:
+        return value
+    return None
+
+
+def _completion_timing(reply, maximum):
+    timings = reply.get("timings")
+    if type(timings) is not dict:
+        timings = {}
+    metrics = {}
+    prompt = _timing_number(reply.get("tokens_evaluated"), CONTEXT_TOKENS, integer=True)
+    if prompt is None:
+        prompt = _timing_number(timings.get("prompt_n"), CONTEXT_TOKENS, integer=True)
+    if prompt is not None:
+        metrics["prompt_tokens"] = prompt
+    completion = _timing_number(reply.get("tokens_predicted"), maximum, integer=True)
+    if completion is not None:
+        metrics["completion_tokens"] = completion
+    for source, target, bound in (
+        ("prompt_ms", "prompt_ms", MAX_CALL_SECONDS * 1000),
+        ("predicted_ms", "generation_ms", MAX_CALL_SECONDS * 1000),
+        ("prompt_per_second", "prompt_tokens_per_second", 1_000_000),
+        ("predicted_per_second", "generation_tokens_per_second", 1_000_000),
+    ):
+        value = _timing_number(timings.get(source), bound)
+        if value is not None:
+            metrics[target] = value
+    return metrics
+
+
+def _record_inference_timing(started, metrics):
+    try:
+        # A larger evidence bound allows observing deadline/cleanup overhead;
+        # it does not extend the inference deadline or active execution budget.
+        elapsed = _timing_number((time.monotonic() - started) * 1000, 1_800_000)
+        if elapsed is not None:
+            metrics["call_elapsed_ms"] = round(elapsed, 3)
+        print(canonical({"event": "inference_timing", **metrics}).decode())
+    except Exception:
+        pass  # Optional numeric evidence must not affect inference or errors.
+
+
 class LocalLlamaProvider:
     """Only fixed IPv4 loopback, native endpoints from the pinned P01 server.
 
@@ -242,7 +287,14 @@ class LocalLlamaProvider:
 
     def infer(self, request, timeout):
         _validate_call(request, timeout)
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        metrics = {}
+        try:
+            return self._infer(request, started + timeout, metrics)
+        finally:
+            _record_inference_timing(started, metrics)
+
+    def _infer(self, request, deadline, metrics):
         applied = self._post("/apply-template", {"messages": [
             {"role": "system", "content": request.system},
             {"role": "user", "content": request.user},
@@ -263,6 +315,7 @@ class LocalLlamaProvider:
             "cache_prompt": False, "stream": False,
             "json_schema": request.response_schema,
         }, deadline)
+        metrics.update(_completion_timing(reply, maximum))
         if reply.get("truncated") is not False:
             raise ProviderError("completion truncation missing or true", diagnostic=(
                 Diagnostic.PROVIDER_TRUNCATED if reply.get("truncated") is True else Diagnostic.PROVIDER_PROTOCOL))

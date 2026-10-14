@@ -7,6 +7,7 @@ No transcript, raw process output or environment is exported from this module.
 
 import hashlib
 import http.client
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -19,7 +20,8 @@ from automation.benchmarks.model_benchmark import (
     LLAMA_COMMIT, LLAMA_TAG, LLAMA_URL, Process, build_llama, fixed_environment,
     DISK_RESERVE_BYTES, CAPTURE_BYTES,
 )
-from .provider import SELECTED_RUNTIME, COMPLETION_TOKENS, LocalLlamaProvider, strict_json
+from .provider import (SELECTED_RUNTIME, COMPLETION_TOKENS, LocalLlamaProvider, strict_json,
+                       canonical, _timing_number)
 
 
 SETUP_SECONDS = 420
@@ -174,6 +176,23 @@ def health(deadline):
         connection.close()
 
 
+def _record_startup_timing(started):
+    try:
+        metrics = {}
+        elapsed = _timing_number((time.monotonic() - started) * 1000, STARTUP_SECONDS * 1000)
+        if elapsed is not None:
+            metrics["model_startup_ms"] = round(elapsed, 3)
+        try:
+            cpus = _timing_number(os.cpu_count(), 4096, integer=True)
+            if cpus is not None and cpus > 0:
+                metrics["runner_cpu_count"] = cpus
+        except Exception:
+            pass  # CPU count may be unavailable; retain valid startup timing.
+        print(canonical({"event": "runtime_timing", **metrics}).decode())
+    except Exception:
+        pass  # Neither logging nor optional metrics may change lifecycle rules.
+
+
 class LocalRuntime:
     """Temporary source/build/GGUF; at most one server, stopped before Docker.
 
@@ -204,7 +223,8 @@ class LocalRuntime:
         if self.server is not None or self.root is None or self.starts >= 2:
             raise RuntimeUnavailable("runtime lifecycle rejected")
         self.starts += 1
-        deadline = time.monotonic() + STARTUP_SECONDS
+        started = time.monotonic()
+        deadline = started + STARTUP_SECONDS
         try:
             self.server = Process(server_argv(self.root), self.root)
             while True:
@@ -217,6 +237,8 @@ class LocalRuntime:
         except BaseException:
             self.stop()
             raise RuntimeUnavailable("selected server startup unavailable") from None
+        finally:
+            _record_startup_timing(started)
 
     @property
     def provider(self):
