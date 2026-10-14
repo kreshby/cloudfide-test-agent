@@ -1,5 +1,9 @@
 # Trusted test-agent boundaries (T02 through T07)
 
+The T02–T07 sections preserve phase-specific development evidence. Current
+runtime limits and skill versions/hashes come from the current implementation in
+`agent.py`, `provider.py`, `runtime.py`, and `skills.py`.
+
 This package uses only the Python standard library. It parses model proposals,
 checks trusted context and test-edit policy, and constructs immutable changes.
 T02 does not write edits, execute commands/tests, load skills, contact providers,
@@ -314,15 +318,15 @@ repair or coercion. Native JSON schema constrains the bounded completions.
 ### Fixed trusted skills
 
 `skills.REGISTRY` is immutable host configuration. Each entry fixes the ID,
-version, repository-relative path, SHA-256 and target applicability. The four
-version `1.0.0` files under `automation/test_agent/trusted_skills/` are:
+version, repository-relative path, SHA-256 and target applicability. The current
+files under `automation/test_agent/trusted_skills/` are:
 
-| Skill | Applicability | SHA-256 |
-| --- | --- | --- |
-| analyze-change | both targets | `fb879bcaa02da848e53b7f2ed0b586e122b7759de574bccf79abb38c1b02d284` |
-| frontend-unit-tests | frontend | `7d9fa26070d887afaf8f9cece72e197754d3283cb550e732b1251fa67b425952` |
-| backend-unit-tests | backend | `3ed8aa01cc9120212cc1a920fadf9fa29b66e1d855c392513652b523fcdacad8` |
-| verify-test-patch | both targets | `92ebfefbb247366f4aad15336f712fc2dd152d129e823ef1f1dc14d0ee26ff96` |
+| Skill | Version | Applicability | SHA-256 |
+| --- | --- | --- | --- |
+| analyze-change | 1.0.0 | both targets | `fb879bcaa02da848e53b7f2ed0b586e122b7759de574bccf79abb38c1b02d284` |
+| frontend-unit-tests | 1.3.0 | frontend | `396040107a3371a151230d6e52e484cb0baa50dc9dded41cf4aadc93352ca37f` |
+| backend-unit-tests | 1.0.0 | backend | `3ed8aa01cc9120212cc1a920fadf9fa29b66e1d855c392513652b523fcdacad8` |
+| verify-test-patch | 1.0.0 | both targets | `92ebfefbb247366f4aad15336f712fc2dd152d129e823ef1f1dc14d0ee26ff96` |
 
 Loading uses T02's descriptor-relative no-follow inspection. Missing files,
 symlinks including ancestors, hardlinks, directories/special files, unsafe modes,
@@ -374,7 +378,7 @@ Limits are trusted constants, never stage payload options:
 | Resource | Bound |
 | --- | --- |
 | Targets / inference calls / rounds per stage per target | 2 / 5 / 1 |
-| Active agent wall time, accumulated across run/resume | 1,800 seconds |
+| Active agent wall time, accumulated across run/resume | 2,100 seconds |
 | Each inference including formatting/tokenization | 600 seconds or remaining active budget |
 | Decision / edits / repair completion tokens | 256 / 768 / 768 |
 | Decision / edits / repair raw response | 4 / 16 / 16 KiB |
@@ -388,7 +392,7 @@ Limits are trusted constants, never stage payload options:
 These are ceilings, not performance measurements.
 
 Local GGUF inference on a standard CPU-only GitHub-hosted runner may be slow.
-The 600-second per-call hard ceiling and 1,800-second active execution ceiling
+The 600-second per-call hard ceiling and 2,100-second active execution ceiling
 are bounded demo ceilings, not expected latency targets. Production use requires
 measured performance and likely faster or self-hosted inference infrastructure.
 The workflow records bounded inference timing evidence to make that tradeoff
@@ -974,7 +978,7 @@ absolute deadline with 10-second socket inactivity bounds. Setup is limited to
 420 seconds, each startup to 90 seconds, source checkout to 120 seconds and the
 host preparation to 2,640 seconds. Existing T03, T04 and T05 limits are unchanged:
 GitHub reads use 10-second requests and the existing request/byte budgets; T04
-allows six calls, 600 seconds per call and 1,800 active seconds overall; T05 limits
+allows five calls, 600 seconds per call and 2,100 active seconds overall; T05 limits
 image build to 600 seconds and each tool to 120 seconds.
 
 The loopback server uses port 8765, CPU only, four threads, context 8192, parallel
@@ -1077,7 +1081,7 @@ A measured exact PR #2 run used 6,495/4,727/4,389/3,160 prompt tokens and
 decision/edit. All ended with EOS. Its longest call took 223.388 seconds and its
 four calls took 717.298 seconds. The then-enforced 300-second call deadline provided
 about 34% headroom; the then-enforced 1,000 active seconds reserved time for both verification
-reviews and normal variation. Absolute deadlines and the six-call/no-retry
+reviews and normal variation. Absolute deadlines and the five-call/no-retry
 limits remain enforced. These measurements are local, not GitHub run results.
 
 Failed results export only the finite `Diagnostic` vocabulary in handoff reason,
