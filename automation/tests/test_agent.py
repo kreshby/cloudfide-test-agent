@@ -369,7 +369,7 @@ def test_both_targets_with_edits_use_exactly_four_model_calls(tmp_path):
 
 
 def test_wall_and_per_call_time_budgets(tmp_path):
-    assert module.MAX_ACTIVE_SECONDS == 1800
+    assert module.MAX_ACTIVE_SECONDS == 2100
     assert module.MAX_CALL_SECONDS == 600
     class Clock:
         now = 0.0
@@ -426,8 +426,8 @@ def test_host_wait_excluded_but_active_budget_preserved_on_resume(tmp_path):
 
 
 def test_trace_and_projection_are_deterministic_and_bounded(tmp_path):
-    _, _, first = make_agent(tmp_path)
-    _, _, second = make_agent(tmp_path)
+    _, _, first = make_agent(tmp_path, clock=lambda: 0.0)
+    _, _, second = make_agent(tmp_path, clock=lambda: 0.0)
     a, b = first.run(), second.run()
     assert a.to_bytes() == b.to_bytes()
     assert len(a.trace) <= MAX_TRACE_EVENTS
@@ -633,7 +633,7 @@ def test_loaded_registry_path_traversal_fails_even_if_host_entry_is_corrupt(monk
 def test_agent_budget_constants_and_no_executable_capabilities():
     assert module.MAX_PROVIDER_CALLS == 5
     assert module.MAX_STAGE_ROUNDS == 1
-    assert module.MAX_ACTIVE_SECONDS == 1800
+    assert module.MAX_ACTIVE_SECONDS == 2100
     assert module.MAX_CALL_SECONDS == 600
     assert module.MAX_FRONTEND_REPAIRS == 1
     assert module.COMPLETION_TOKENS == {Stage.DECISION: 256, Stage.EDITS: 768, Stage.REPAIR: 768}

@@ -24,7 +24,7 @@ from .frontend_create import FrontendCreateError, frontend_create_contract, asse
 MAX_PROVIDER_CALLS = 5
 MAX_STAGE_ROUNDS = 1  # Per (stage, target), including the single frontend repair.
 MAX_FRONTEND_REPAIRS = 1
-MAX_ACTIVE_SECONDS = 1800
+MAX_ACTIVE_SECONDS = 2100
 MAX_PROJECTION_BYTES = 16 * 1024
 MAX_TRACE_EVENTS = 48
 MAX_TRACE_BYTES = 64 * 1024
@@ -340,11 +340,11 @@ class UnitTestAgent:
         self._trace.append(raw.decode())
         self._trace_bytes += len(raw)
 
-    def _remaining(self):
+    def _remaining(self, maximum=MAX_CALL_SECONDS):
         remaining = self._deadline - self._clock()
         if remaining <= 0:
             raise AgentError("active wall-time budget exhausted")
-        return min(MAX_CALL_SECONDS, remaining)
+        return min(maximum, remaining)
 
     def _ask(self, stage, target, payload, skill_ids):
         if self._calls >= MAX_PROVIDER_CALLS:
@@ -373,7 +373,12 @@ class UnitTestAgent:
                     skills=[asdict(s.record) for s in loaded])
         self._calls += 1
         self._rounds.add((stage, target))
-        timeout = self._remaining()
+        remaining = self._remaining(MAX_ACTIVE_SECONDS)
+        timeout = min(MAX_CALL_SECONDS, remaining)
+        # Fixed enums and capped host-clock numbers only; record before inference
+        # so provider failures retain the allocation without any response text.
+        self._event("provider-call", stage=stage, target=target,
+                    timeout_seconds=timeout, remaining_active_seconds=remaining)
         started = self._clock()
         try:
             raw = self._provider.infer(request, timeout)
