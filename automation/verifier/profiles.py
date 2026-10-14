@@ -16,6 +16,7 @@ class Profile:
 PROFILES = MappingProxyType({
     "frontend-baseline-typecheck": Profile("frontend", "baseline", "tsc"),
     "frontend-baseline-suite": Profile("frontend", "baseline", "vitest"),
+    "frontend-patched-structural": Profile("frontend", "patched", "structural"),
     "frontend-patched-typecheck": Profile("frontend", "patched", "tsc"),
     "frontend-patched-targeted": Profile("frontend", "patched", "vitest", targeted=True),
     "frontend-patched-suite": Profile("frontend", "patched", "vitest", coverage=True),
@@ -32,9 +33,11 @@ STACK_PROFILES = MappingProxyType({
 def command(profile_id, paths=(), *, excluded_updates=False):
     """Only host-selected IDs and revalidated relative test paths reach here."""
     p = PROFILES[profile_id]
+    if p.command_id == "structural":
+        return ("/usr/local/bin/node", "/opt/verifier/structural.cjs")
     if p.command_id == "tsc":
         return ("/usr/local/bin/node", "/opt/frontend/node_modules/typescript/bin/tsc",
-                "--noEmit", "--project",
+                "--noEmit", "--pretty", "false", "--project",
                 "tsconfig.verifier.json" if excluded_updates else "tsconfig.json")
     if p.command_id == "vitest":
         argv = ("/usr/local/bin/node", "/opt/frontend/node_modules/vitest/vitest.mjs",

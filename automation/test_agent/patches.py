@@ -19,6 +19,7 @@ class TrustedChanges:
     changed_files: tuple[str, ...]
     permitted_test_paths: tuple[str, ...]
     edits: tuple[ValidatedEdit, ...]
+    frontend_subjects: tuple[tuple[str, str], ...] = ()
 
     def to_bytes(self) -> bytes:
         """Canonical UTF-8 JSON, sorted by path and keys, independent of input order."""
@@ -35,6 +36,7 @@ class TrustedChanges:
             "changed_files": self.changed_files,
             "permitted_test_paths": self.permitted_test_paths,
             "edits": changes,
+            **({"frontend_subjects": self.frontend_subjects} if self.frontend_subjects else {}),
         }, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -54,7 +56,10 @@ def prepare_changes(payload: Any, context: TrustedContext) -> TrustedChanges:
     proposal = ModelProposal.from_payload(payload)
     edits = validate_proposal(proposal, context)
     return TrustedChanges(context.source, tuple(sorted(context.changed_files)),
-                          tuple(sorted(context.permitted_test_paths)), edits)
+                          tuple(sorted(context.permitted_test_paths)), edits,
+                          tuple(sorted((e.path, d.selected_source_path) for d in proposal.decisions
+                                       if d.target == "frontend" and d.selected_source_path is not None
+                                       for e in edits if e.target == d.target)))
 
 
 def assess_proposal(payload: Any, context: TrustedContext) -> PolicyAssessment:

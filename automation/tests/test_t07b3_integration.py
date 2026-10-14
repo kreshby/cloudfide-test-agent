@@ -27,7 +27,7 @@ def test_exact_pr_fixture_reaches_both_targets_via_concrete_provider(tmp_path, c
         if path == "/apply-template":
             system, user = payload["messages"]
             request = json.loads(user["content"])
-            assert request["response_shape_sha256"] == digest(canonical(stage_shape(request["stage"])))
+            assert request["response_shape_sha256"] == digest(canonical(stage_shape(request["stage"], request["target"])))
             schema = json.loads(system["content"].split("\nResponse JSON schema (all fields required; no extra fields):\n")[1])
             requests.append((request, schema))
             return 200, {"prompt": "finite wire fixture"}
@@ -131,7 +131,7 @@ def test_multiple_intended_files_fail_before_bounded_edit_completion(tmp_path):
 def test_edit_subject_has_exact_current_head_source_without_historical_copy(target, path, subject):
     from automation.test_agent.agent import MAX_PROJECTION_BYTES
     bundle = live_bundle()
-    raw = project_context(bundle, target, [path])
+    raw = project_context(bundle, target, [path], subject if target == Target.FRONTEND else None)
     assert len(raw) <= MAX_PROJECTION_BYTES
     evidence = json.loads(raw)
     captured = next(e for e in bundle.sources if e.path == subject and e.source_sha == bundle.source.head_sha)

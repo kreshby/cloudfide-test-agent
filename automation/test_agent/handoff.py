@@ -16,7 +16,7 @@ from .policy import test_path
 from .provider import canonical, digest, strict_json
 from .reporting import (DeliveryState, MAX_ADVISORY_BYTES, MAX_COMMENT_BYTES, PatchDelivery, PreparedReport,
                         PublicationIdentity, ReportingError, _MEANINGS, _verification, bind_evidence,
-                        inert_text, report_status)
+                        inert_text, relevance_warning_lines, report_status)
 from .skills import REGISTRY
 from .diagnostics import EXPLANATIONS, safe_diagnostic
 from .verification import CommandEvidence, Counts, VerificationReport
@@ -126,16 +126,21 @@ def _verification_data(value, source, changes_hash):
         records.append(VerifierResult(**{**obj, "kind": ExecutionKind(obj["kind"]),
                                         "result": ExecutionResult(obj["result"])}))
     host_result = HostResult(source, FinalHostStatus(host["status"]), tuple(records), host["schema_version"])
-    if type(value["commands"]) is not list or len(value["commands"]) > 8:
+    if type(value["commands"]) is not list or len(value["commands"]) > 9:
         raise HandoffError("command budget rejected")
     commands = []
     for raw in value["commands"]:
+        # Version-1 archived handoffs predate structural facts.
+        raw = {"structural": [], **raw}
         fields(raw, COMMAND_FIELDS | {"has_error"})
         if type(raw["has_error"]) is not bool or type(raw["reports"]) is not list:
             raise HandoffError("command schema rejected")
         obj = {k: v for k, v in raw.items() if k != "has_error"}
         obj["error"] = "command evidence unavailable" if raw["has_error"] else None
         obj["kind"] = ExecutionKind(obj["kind"])
+        if type(obj["structural"]) is not list:
+            raise HandoffError("structural facts rejected")
+        obj["structural"] = tuple(obj["structural"])
         if obj["counts"] is not None:
             counts = fields(obj["counts"], set(Counts.__dataclass_fields__))
             if type(counts["files"]) is not list or any(type(p) is not list or len(p) != 2 for p in counts["files"]):
@@ -315,6 +320,7 @@ def report(value, *, artifact_id=None):
         for c in verification.commands:
             counts = "no test count" if c.counts is None else f"collected {c.counts.collected}, passed {c.counts.passed}, failed {c.counts.failed}, errors {c.counts.errors}, skipped {c.counts.skipped}"
             lines.append(f"- {c.profile_id}: {c.kind}; {'passed' if c.passed else 'not passed'}; {counts}; exit {c.exit_code}; timeout {str(c.timed_out).lower()}.")
+            lines.extend(relevance_warning_lines(c))
             for ref, size, hashed in c.reports:
                 lines.append(f"  Report: {inert_text(ref)}; {size} bytes; SHA-256 `{hashed}`.")
     for s in f["skills"]:

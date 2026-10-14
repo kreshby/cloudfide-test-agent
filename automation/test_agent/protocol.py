@@ -1,6 +1,6 @@
 """Trusted stage shapes, shared by prompts, native grammar and request binding."""
 
-MAX_INTENDED_TEST_FILES = 1  # One bounded edit completion per target, no repair loop.
+MAX_INTENDED_TEST_FILES = 1  # One bounded edit completion per target.
 
 
 def object_schema(properties):
@@ -8,9 +8,11 @@ def object_schema(properties):
             "additionalProperties": False}
 
 
-def stage_shape(stage):
+def stage_shape(stage, target=None):
     if stage == "decision":
         return {
+            **({"selected_source_path": {"type": ["string", "null"]}}
+               if target == "frontend" else {}),
             "action": {"enum": ["generate", "update", "no-tests-needed", "unsupported"]},
             "changed_behavior": {"type": "string"},
             "existing_test_evidence": {"type": "array", "items": {"type": "string"}},
@@ -23,18 +25,20 @@ def stage_shape(stage):
             "path": {"type": "string"}, "operation": {"enum": ["create", "update"]},
             "original_sha256": {"type": ["string", "null"]}, "content": {"type": "string"},
         })}}
-    if stage == "verification":
-        return {"recommendation": {"enum": ["accept", "reject", "unavailable"]},
-                "interpretation": {"type": "string"}}
+    if stage == "repair":
+        return {"replacement_content": {"type": "string", "minLength": 1}}
     raise ValueError("unsupported trusted stage")
 
 
 def stage_schema(stage, target, binding, evidence=None, *, constrain_actions=False):
-    shape = stage_shape(stage)
+    shape = stage_shape(stage, target)
     if stage == "decision" and type(evidence) is dict:
         tests = evidence.get("existing_tests")
         candidates = evidence.get("candidate_tests")
         if type(tests) is list and type(candidates) is list:
+            if target == "frontend":
+                subjects = evidence.get("selectable_source_paths", [])
+                shape["selected_source_path"] = {"enum": [None, *subjects]}
             available = sorted({e["path"] for e in tests if e.get("state") == "available"})
             paths = sorted({e["path"] for e in candidates})
             shape["existing_test_evidence"] = ({"type": "array", "items": {"enum": available}}
@@ -56,6 +60,12 @@ def stage_schema(stage, target, binding, evidence=None, *, constrain_actions=Fal
                 if paths == [] or action == "no-tests-needed" and not available:
                     continue
                 properties = {**schema["properties"], "action": {"const": action}}
+                if target == "frontend":
+                    subjects = evidence.get("selectable_source_paths", [])
+                    if paths is not None and not subjects:
+                        continue
+                    properties["selected_source_path"] = ({"enum": subjects} if paths is not None
+                                                          else {"const": None})
                 properties["intended_test_files"] = ({"type": "array", "minItems": 1, "maxItems": 1,
                                                        "items": {"enum": paths}} if paths is not None else
                                                       {"type": "array", "maxItems": 0, "items": {"type": "string"}})

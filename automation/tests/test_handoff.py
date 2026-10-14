@@ -189,12 +189,12 @@ def test_validated_advisory_plan_recommendations_and_both_skill_hashes_survive(t
         assert set(fact) == {'target', 'action', 'changed_behavior', 'rationale'}
         assert fact['changed_behavior'] == decision.plan.changed_behavior
         assert fact['rationale'] == decision.plan.rationale
-    assert value['facts']['recommendations'] == list(result.recommendations) == ['accept']
+    assert value['facts']['recommendations'] == list(result.recommendations) == []
     body = h.report(value, artifact_id=700).body
     for decision in result.proposal.decisions:
         assert 'Changed behavior: ' + inert_text(decision.plan.changed_behavior) in body
         assert 'Rationale: ' + inert_text(decision.plan.rationale) in body
-    assert 'Review recommendations (advisory): accept' in body
+    assert 'Review recommendations (advisory):' not in body
     for skill in value['facts']['skills']:
         expected = (f"Loaded skill: {inert_text(skill['skill_id'])} {inert_text(skill['version'])} ({skill['target']}); "
                     f"content SHA-256 `{skill['content_sha256']}`; loaded SHA-256 `{skill['loaded_content_sha256']}`")

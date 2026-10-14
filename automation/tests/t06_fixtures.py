@@ -12,7 +12,7 @@ from automation.test_agent.contracts import (ExecutionKind, ExecutionResult, Fin
 from automation.test_agent.github import Response
 from automation.test_agent.provider import FakeProvider, canonical, digest
 from automation.test_agent.publisher import PublisherAuthor
-from automation.test_agent.verification import CommandEvidence, Counts, VerificationReport
+from automation.test_agent.verification import CommandEvidence, Counts, VerificationReport, structural_contracts
 from automation.verifier.profiles import PROFILES
 from automation.tests.t04_fixtures import (bundle_for, decisions_for, install_originals, transcript)
 
@@ -50,12 +50,18 @@ def fixture(root, case="frontend-generate", status=FinalHostStatus.VERIFIED, *, 
                       status == FinalHostStatus.VERIFICATION_FAILED and p.kind == "patched")
             n = 1 if p.targeted else 3 if p.kind == "baseline" else 4
             path = next(e.path for e in initial.policy.changes.edits if e.target.value == p.stack)
-            counts = None if p.command_id == "tsc" else Counts(n, 0 if broken else n, n if broken else 0, 0, 0, ((path, n),))
+            counts = None if p.command_id in {"tsc", "structural"} else Counts(n, 0 if broken else n, n if broken else 0, 0, 0, ((path, n),))
             refs = () if counts is None else ((f"reports/{index}/tests.json" if p.stack == "frontend" else f"reports/{index}/tests.xml", 25, "e" * 64),)
             c = CommandEvidence(step, p.command_id, ExecutionKind(p.kind), "sha256:" + "f" * 64,
                                 bundle.source.head_sha, changes_hash, 0.25, 1 if broken else 0,
                                 False, 12, 0, "a" * 64, digest(b""), refs, counts,
                                 "/private/log/SHOULD_NOT_RENDER" if broken else None, not broken)
+            if p.command_id == "structural":
+                facts = tuple({**contract, "validator": "typescript-structural-v1", "syntax_diagnostics": 1 if broken else 0,
+                               "jsx_nodes": 0, "subject_imported": True,
+                               "categories": ["syntax-invalid"] if broken else [], "passed": not broken}
+                              for contract in structural_contracts(bundle.source, initial.policy.changes))
+                c = replace(c, structural=facts)
             commands.append(c)
             if counts:
                 records.append(VerifierResult(step, p.command_id, c.kind,

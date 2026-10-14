@@ -146,6 +146,12 @@ class FakeExecutor:
             self.started.append(argv[4])
             return capture(argv[4].encode())
         if operation == "exec":
+            if argv[8] == "frontend-patched-structural":
+                contracts = v.parse_json((self.current["root"] / "structural-input.json").read_bytes())
+                facts = [{**c, "validator": "typescript-structural-v1", "syntax_diagnostics": 0,
+                          "jsx_nodes": 0, "subject_imported": True, "categories": [], "passed": True}
+                         for c in contracts]
+                return capture(v.canonical(facts))
             if argv[8] == "export":
                 if self.fault == "export":
                     raise v.Unavailable("dummy export failure")
@@ -218,8 +224,78 @@ def accepted(fixture, *, update=False):
                       "original_sha256": v.digest((root / path).read_bytes()) if update else None, "content": content})
         decisions.append({"target": str(target), "action": "update" if update else "generate", "plan": {
             "changed_behavior": "fixed dummy behavior", "existing_test_evidence": [], "rationale": "test boundary",
-            "intended_test_files": [path], "skill_ids": []}})
+            "intended_test_files": [path], "skill_ids": []},
+            "selected_source_path": "frontend/src/value.ts" if target == Target.FRONTEND else None})
     return prepare_changes({"schema_version": 1, "source": asdict(source), "decisions": decisions, "edits": edits}, context)
+
+
+@pytest.mark.parametrize('update', [False, True])
+@pytest.mark.parametrize('fault,step', [
+    (None, None),
+    ('fail_step', 'frontend-patched-typecheck'),
+    ('zero_step', 'frontend-patched-targeted'),
+    ('fail_step', 'frontend-patched-targeted'),
+    ('fail_step', 'frontend-patched-suite'),
+    ('timeout_step', 'frontend-patched-targeted'),
+    ('bad_report_step', 'frontend-patched-targeted'),
+])
+def test_relevance_warning_continues_required_verification(fixture, update, fault, step):
+    root, source, _, executor = fixture
+    changes = accepted(fixture, update=update)
+    if fault:
+        setattr(executor, fault, step)
+    original = executor.run
+    def run(argv, **kwargs):
+        if argv[:3] == v.DOCKER and argv[3] == 'exec' and argv[8] == 'frontend-patched-structural':
+            contracts = v.parse_json((executor.current['root'] / 'structural-input.json').read_bytes())
+            facts = [{**c, 'validator': 'typescript-structural-v1', 'syntax_diagnostics': 0,
+                      'jsx_nodes': 0, 'subject_imported': False,
+                      'categories': ['selected-subject-not-directly-imported'], 'passed': True}
+                     for c in contracts]
+            return capture(v.canonical(facts))
+        return original(argv, **kwargs)
+    executor.run = run
+    report = v.Verifier(executor=executor).verify(source, root, changes, image=executor.image)
+    structural = next(c for c in report.commands if c.command_id == 'structural')
+    assert structural.passed and structural.error is None and structural.counts is None
+    assert structural.structural[0]['subject_imported'] is False
+    assert b'selected-subject-not-directly-imported' in report.to_bytes()
+    steps = [c.profile_id for c in report.commands]
+    assert 'frontend-patched-typecheck' in steps
+    if step != 'frontend-patched-typecheck':
+        assert 'frontend-patched-targeted' in steps
+    if step is None or step == 'frontend-patched-suite':
+        assert 'frontend-patched-suite' in steps
+        targeted = next(c for c in report.commands if c.profile_id == 'frontend-patched-targeted')
+        assert targeted.passed and targeted.counts.collected > 0 and targeted.counts.passed > 0
+    if fault:
+        assert report.host_result.status == FinalHostStatus.VERIFICATION_FAILED
+        assert report.reason == 'required patched verification failed'
+        assert report.commands[-1].profile_id == step and not report.commands[-1].passed
+    else:
+        assert report.host_result.status == FinalHostStatus.VERIFIED
+        assert all(c.passed for c in report.commands)
+        assert 'backend-patched-targeted' in steps and 'backend-patched-suite' in steps
+
+
+@pytest.mark.parametrize('mutation', ['source', 'content', 'changes', 'warning-missing',
+                                      'false-failure', 'unsafe-pass', 'unknown-category'])
+def test_advisory_structural_facts_remain_strictly_bound(fixture, mutation):
+    contract = v.structural_contracts(fixture[1], accepted(fixture))[0]
+    fact = {**contract, 'validator': 'typescript-structural-v1', 'syntax_diagnostics': 0,
+            'jsx_nodes': 0, 'subject_imported': False,
+            'categories': ['selected-subject-not-directly-imported'], 'passed': True}
+    assert v.validate_structural([fact], [contract]) == (fact,)
+    fact = {**fact}
+    if mutation == 'source': fact['source'] = {**fact['source'], 'head_sha': 'e' * 40}
+    elif mutation == 'content': fact['content_sha256'] = 'e' * 64
+    elif mutation == 'changes': fact['changes_sha256'] = 'e' * 64
+    elif mutation == 'warning-missing': fact['categories'] = []
+    elif mutation == 'false-failure': fact['passed'] = False
+    elif mutation == 'unsafe-pass': fact['categories'] = [*fact['categories'], 'unsafe-import-path']
+    else: fact['categories'] = ['model-says-relevant']
+    with pytest.raises(v.ReportError):
+        v.validate_structural([fact], [contract])
 
 
 def verify(fixture, changes=None):
@@ -234,13 +310,13 @@ def test_good_both_stacks_exact_argv_and_real_count_contract(fixture):
     assert report.host_result.status == FinalHostStatus.VERIFIED
     assert report.host_result.source == source
     assert len(report.host_result.verifier_results) == 6
-    assert len(report.commands) == 8
+    assert len(report.commands) == 9
     assert all(r.collected_tests >= 1 for r in report.host_result.verifier_results)
     assert all(c.counts is None for c in report.commands if c.command_id == "tsc")
     assert all(c.source_sha == source.head_sha and c.changes_sha256 == report.changes_sha256 for c in report.commands)
     assert {p: (root / p).read_bytes() for p in files} == before
     assert not (root / NEW_FRONTEND).exists()
-    assert len(executor.started) == len(executor.removed) == 8 and not executor.containers
+    assert len(executor.started) == len(executor.removed) == 9 and not executor.containers
     for argv, timeout, limit in executor.calls:
         if argv[0] == v.GIT:
             continue

@@ -173,18 +173,25 @@ class TargetDecision:
     target: Target
     action: ModelAction
     plan: TestPlan
+    selected_source_path: str | None = None
 
     def __post_init__(self):
         if (type(self.target) is not Target or type(self.action) is not ModelAction
                 or type(self.plan) is not TestPlan):
             raise ContractError("decision requires target/action enums and a test plan")
+        if self.selected_source_path is not None:
+            _text(self.selected_source_path, "selected_source_path", 240)
 
     @classmethod
     def from_mapping(cls, value: Any):
-        obj = _object(value, set(cls.__dataclass_fields__), "decision")
+        # Older T02 callers can omit the new field; the frontend runtime gate
+        # requires it for edits. Backend/non-edit decisions use null.
+        fields = set(cls.__dataclass_fields__)
+        obj = _object(value, fields if type(value) is dict and "selected_source_path" in value
+                      else fields - {"selected_source_path"}, "decision")
         return cls(_enum(Target, obj["target"], "target"),
                    _enum(ModelAction, obj["action"], "action"),
-                   TestPlan.from_mapping(obj["plan"]))
+                   TestPlan.from_mapping(obj["plan"]), obj.get("selected_source_path"))
 
 
 @dataclass(frozen=True)

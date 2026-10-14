@@ -94,7 +94,7 @@ def main():
                                                   for part in path.split("/")) for path in paths
     ):
         raise ValueError("invalid test path")
-    if p.command_id != "tsc" and not paths:
+    if p.command_id not in {"tsc", "structural"} and not paths:
         raise ValueError("explicit nonempty test inventory required")
     shutil.copytree("/input", "/work/repo", symlinks=False)
     root = Path("/work/repo") / p.stack

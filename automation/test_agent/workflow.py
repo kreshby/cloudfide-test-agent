@@ -270,6 +270,7 @@ def execute(pre, reader, *, source_factory=SourceCheckout, runtime_factory=Local
         return terminal_facts("UNAVAILABLE", "repository-unavailable"), None
     publication = AgentRun(pre.identity.workflow_run_id, pre.identity.run_attempt)
     verification = None
+    intermediate_verification = None
     artifact = None
     try:
         with source_factory(pre.source) as root:
@@ -285,15 +286,28 @@ def execute(pre, reader, *, source_factory=SourceCheckout, runtime_factory=Local
                             f.path.startswith(t + "/") for f in bundle.changed_files) or any(
                             e.target.value == t for e in result.policy.changes.edits))
                         try:
-                            verification = verifier_factory().verify(bundle.source, root, result.policy.changes,
-                                                                      profile_ids=profiles)
+                            verifier = verifier_factory()
+                            verification = verifier.verify(bundle.source, root, result.policy.changes,
+                                                           profile_ids=profiles)
                             bind_evidence(bundle, result, verification, publication=publication)
                         except Exception:
                             verification = None  # No fabricated HostResult for an unavailable verifier.
                         if verification is not None:
                             try:
-                                runtime.start()
-                                result = agent.resume(verification.host_result)
+                                if verification.compiler_failure is not None:
+                                    runtime.start()
+                                    result = agent.repair(verification.compiler_failure)
+                                    runtime.stop()
+                                    if result.state == State.AWAITING_VERIFICATION:
+                                        intermediate_verification = verification
+                                        verification = None
+                                        verification = verifier.verify(
+                                            bundle.source, root, result.policy.changes,
+                                            profile_ids=profiles, image=intermediate_verification.image)
+                                        bind_evidence(bundle, result, verification, publication=publication)
+                                if result.state == State.AWAITING_VERIFICATION and verification is not None:
+                                    # Never inspect the second failure for another repair.
+                                    result = agent.resume(verification.host_result)
                             except Exception:
                                 result = replace(result, state=State.FAILED, failure="verification feedback unavailable",
                                                  diagnostic=Diagnostic.VERIFIER)
@@ -317,10 +331,11 @@ def execute(pre, reader, *, source_factory=SourceCheckout, runtime_factory=Local
     except Exception:
         return terminal_facts("UNAVAILABLE", "checkout-unavailable"), None
     finally:
-        if verification is not None and verification.output_directory.exists():
+        for evidence in (verification, intermediate_verification):
             # T05 owns this directory; it never arrives from JSON or PR metadata.
-            import shutil
-            shutil.rmtree(verification.output_directory)
+            if evidence is not None and evidence.output_directory.exists():
+                import shutil
+                shutil.rmtree(evidence.output_directory)
 
 
 def _output(**values):

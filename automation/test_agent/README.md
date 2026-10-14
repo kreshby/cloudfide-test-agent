@@ -46,6 +46,7 @@ A model proposal has exactly these fields:
   "decisions": [{
     "target": "frontend",
     "action": "generate",
+    "selected_source_path": "frontend/src/value.ts",
     "plan": {
       "changed_behavior": "The value is accepted",
       "existing_test_evidence": [],
@@ -59,7 +60,7 @@ A model proposal has exactly these fields:
     "path": "frontend/src/value.test.ts",
     "operation": "create",
     "original_sha256": null,
-    "content": "it('accepts', () => expect(1).toBe(1))\n"
+    "content": "import {it,expect} from 'vitest'\nimport {value} from './value'\nit('accepts', () => expect(value).toBe(1))\n"
   }]
 }
 ```
@@ -69,6 +70,11 @@ creates; `update` requires at least one update for that target and may contain
 supplemental creates. `no-tests-needed`
 and `unsupported` have no edits. Intended files must match each target's edits.
 Plans are model claims. Empty skill IDs are valid; no skill use is fabricated.
+Frontend runtime edits require `selected_source_path`: one available, captured,
+changed head source, excluding tests/configuration/fixtures. Backend and non-edit
+decisions use null; older T02 data may omit it. The runtime binds the explicit
+subject, exact test path, operation, language and current API into edit and repair
+requests. Frontend subjects also enter the accepted changes digest.
 `SkillUseRecord` is a separate host record of actual skill loading with
 ID, version, content hash, loaded-content hash, target and schema version.
 
@@ -253,6 +259,7 @@ INITIAL -> DECIDING -> [GENERATING_EDITS -> DECIDING for another target]
                    -> PROPOSAL_READY -> FINISHED (no edits)
                                      -> AWAITING_VERIFICATION (edits)
 AWAITING_VERIFICATION -> REVIEWING_VERIFICATION -> FINISHED
+AWAITING_VERIFICATION -> REPAIRING (frontend, once) -> AWAITING_VERIFICATION
 Any active phase -> FAILED on a contract, policy, or budget rejection
 ```
 
@@ -271,7 +278,7 @@ Every stage returns exactly `binding`, `target`, and these fields:
 | --- | --- |
 | Decision | `action`, `changed_behavior`, `existing_test_evidence`, `rationale`, `intended_test_files` |
 | Edits | `edits`: objects with `path`, `operation`, `original_sha256`, `content` |
-| Verification review | `recommendation` (`accept`, `reject`, `unavailable`), `interpretation` |
+| Frontend compiler repair | `replacement_content`: complete source at the host-fixed accepted path |
 
 Decision responses contain no test code. Evidence citations must name available,
 unclipped existing tests in that target's projection; no-tests-needed requires a
@@ -295,11 +302,14 @@ arbitrary local files, README/AGENTS instructions or URLs are followed.
 
 Each request includes the exact host source identity and complete T03 bundle
 digest. The host hashes canonical source/context/stage/target/input bytes into
-the binding. Edit bindings also include the accepted decision; review bindings
-include the proposal digest and verification summary. The model must echo the
+the binding. Edit bindings also include the accepted decision and frontend
+language facts derived from the path (`.ts`: no JSX; `.tsx`: JSX allowed).
+Repair bindings include that path, prior content, current accepted changes,
+bounded compiler diagnostics and verifier command evidence digests, and attempt
+number 1. The model must echo the
 expected binding and target. Unknown fields, tools, duplicate keys, non-finite
 numbers, fences, surrounding prose and stale bindings fail. There is no JSON
-repair, coercion, or grammar enforcement in this version.
+repair or coercion. Native JSON schema constrains the bounded completions.
 
 ### Fixed trusted skills
 
@@ -363,20 +373,20 @@ Limits are trusted constants, never stage payload options:
 
 | Resource | Bound |
 | --- | --- |
-| Targets / inference calls / rounds per stage per target | 2 / 6 / 1 |
+| Targets / inference calls / rounds per stage per target | 2 / 5 / 1 |
 | Active agent wall time, accumulated across run/resume | 1,000 seconds |
 | Each inference including formatting/tokenization | 300 seconds or remaining active budget |
-| Decision / edits / review completion tokens | 256 / 768 / 192 |
-| Decision / edits / review raw response | 4 / 16 / 2 KiB |
+| Decision / edits / repair completion tokens | 256 / 768 / 768 |
+| Decision / edits / repair raw response | 4 / 16 / 16 KiB |
 | Canonical provider request / target projection | 24 / 16 KiB |
-| HTTP request or response / total HTTP calls | 128 KiB each / at most 18 |
+| HTTP request or response / total HTTP calls | 128 KiB each / at most 15 |
 | Tokenized prompt plus completion | 8,192 tokens |
 | Each trusted skill body | 2 KiB |
 | Trace events / trace bytes | 48 / 64 KiB |
 | Trusted verification records | 8 |
 
 These are ceilings, not performance measurements. P01's CPU evidence motivates
-smaller decision/review completions and separate targets; 768-token edits may
+smaller decision completions and separate targets; 768-token edits/repairs may
 still time out and are not retried. Human/verifier wait time is excluded from
 the active agent budget, which is preserved when resuming the same instance.
 The concrete local adapter enforces deadlines during HTTP; arbitrary injected
@@ -397,13 +407,26 @@ the trace alone is not an independent archive of those request bodies.
 `resume(HostResult)` is valid only on AWAITING_VERIFICATION. It requires exact
 source equality, bounded existing `VerifierResult` records, and their unchanged
 T02 contract validation. VERIFIED requires successful baseline and patched
-execution evidence. The review stage sees concise actual result/count/exit-code
-fields and no report logs. Its recommendation cannot replace the host status.
+execution evidence. Host feedback directly selects the terminal outcome;
+there is no model verification interpretation or runtime restart for a verdict.
 Failed, not-run, baseline-failed, unavailable or stale evidence never becomes
-verified. A malformed review fails the agent even when host evidence exists.
-There is no automatic repair. T05 must produce real trustworthy evidence tied
+verified. T05 must produce real trustworthy evidence tied
 to the exact proposal and target profiles; Python host types are not evidence
 authentication or a sandbox against a malicious trusted caller.
+
+One frontend repair is eligible only after passing baseline typecheck and suite,
+and a failed patched non-pretty TypeScript check (exit 2, no timeout/runtime
+error/clipping). Every diagnostic must resolve to the sole accepted frontend
+test path. Unknown codes, mixed files, raw logs, malformed or oversized messages
+fail closed. At most eight diagnostics contain code, bounded line/column and a
+fixed host-owned explanation; compiler-quoted source literals are never sent.
+The runtime is stopped during verification and restarted only for this repair.
+The replacement retains the original operation/path/source binding, undergoes
+ordinary T02 policy again, and may not reduce recognizable tests/assertions.
+A fresh isolated verifier repeats the guards, patched typecheck, targeted tests
+and full suites. Its verdict is terminal even if it produces repairable errors.
+There is no backend repair. Lexical checks cannot prove semantic assertion
+strength or behavioral relevance; review remains necessary.
 
 The CLI uses explicit provider selection and stdout only:
 
@@ -1062,3 +1085,19 @@ syntax guidance changes. Both review completions succeeded within 192 tokens;
 handoff and local publication preserved VERIFICATION_FAILED. This is not a
 model qualification or a successful repeatability result. No model/runtime pin
 or GitHub state was changed.
+
+B9 frontend preflight uses the image-owned `structural.cjs` with the existing
+locked TypeScript 5.8.3 API. Each accepted frontend edit passes the fixed
+`frontend-patched-structural` operation after baseline guards and before patched
+`tsc`/Vitest. Exact UTF-8 content is parsed as TS for `.test.ts` and TSX for
+`.test.tsx`; syntax errors and forbidden JSX fail closed. New tests require a
+value-bearing static relative import resolving uniquely to the bound source
+(explicit `.ts`/`.tsx`, extensionless files or repository index conventions).
+Updates retain established barrel/helper relationships. Only bounded categories,
+counts and source/path/content/changes identities leave this parser; source is
+never executed, rewritten or renamed. Structural failure stops patched tests and
+has no repair loop. Any eligible compiler replacement runs the same preflight in
+a fresh verifier; a byte-identical replacement is rejected before that verifier.
+The authenticated frontend skill contains small illustrative TS/TSX patterns
+within the unchanged 2 KiB limit. Projection-clipped test metadata omits redundant
+content hashes; complete evidence keeps its exact hash within the 16 KiB budget.

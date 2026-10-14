@@ -28,6 +28,54 @@ def test_exact_verdict_matrix_and_source_identity(tmp_path, status):
     assert len(report.body.encode()) <= MAX_COMMENT_BYTES
     if status in {FinalHostStatus.UNAVAILABLE, FinalHostStatus.STALE, FinalHostStatus.UNSUPPORTED}:
         assert "No commands executed" in report.body
+
+
+def test_advisory_import_warning_survives_trusted_report_and_handoff(tmp_path):
+    from automation.test_agent import handoff as h
+    from automation.test_agent.provider import digest
+    from automation.test_agent.reporting import AgentRun, verification_metadata
+    from automation.tests.test_workflow import pre_for
+
+    bundle, result, verification = fixture(tmp_path)
+    commands = tuple(replace(c, structural=tuple({**f, 'subject_imported': False,
+                        'categories': ['selected-subject-not-directly-imported']} for f in c.structural))
+                     if c.command_id == 'structural' else c for c in verification.commands)
+    verification = replace(verification, commands=commands)
+    bound = bind_evidence(bundle, result, verification)
+    metadata = verification_metadata(bound)
+    facts = next(c['structural'] for c in metadata['commands'] if c['command_id'] == 'structural')
+    assert facts[0]['subject_imported'] is False and facts[0]['passed']
+    assert facts[0]['categories'] == ['selected-subject-not-directly-imported']
+    prepared = prepare_report(bundle, result, verification)
+    assert prepared.status == 'VERIFIED' and 'Host verification: **VERIFIED**' in prepared.body
+    assert 'was not observed (advisory; not proof of behavioral relevance)' in prepared.body
+
+    pre = pre_for(bundle)
+    selected = h.execution_facts(bundle, result, verification, AgentRun(100, 1), patch_prepared=True)
+    raw = h.encode(pre.identity, pre.source, pre.source_ci, '8' * 40, selected)
+    decoded = h.decode(raw, digest(raw), expected_identity=pre.identity,
+                       expected_source_ci=pre.source_ci, expected_trusted_sha='8' * 40)
+    assert len(raw) < h.MAX_HANDOFF_BYTES
+    assert b'selected-subject-not-directly-imported' in raw
+    assert b'raw_response' not in raw and b'prompt' not in raw and b'/private/' not in raw
+    rendered = h.report(decoded, artifact_id=700)
+    assert rendered.status == 'VERIFIED' and h.successful(rendered)
+    assert 'was not observed (advisory; not proof of behavioral relevance)' in rendered.body
+
+    # Recomputed byte digests never authorize a stale source or invented relevance.
+    for field, value in [('content_sha256', 'e' * 64), ('categories', ['model-says-relevant'])]:
+        bad_fact = {**facts[0], field: value}
+        bad_commands = tuple(replace(c, structural=(bad_fact,)) if c.command_id == 'structural' else c
+                             for c in commands)
+        with pytest.raises(ReportingError):
+            bind_evidence(bundle, result, replace(verification, commands=bad_commands))
+    altered = json.loads(raw)
+    structural = next(c for c in altered['facts']['verification']['commands'] if c['command_id'] == 'structural')
+    structural['structural'][0]['source']['head_sha'] = 'e' * 40
+    altered_raw = canonical(altered)
+    with pytest.raises(h.HandoffError):
+        h.decode(altered_raw, digest(altered_raw), expected_identity=pre.identity,
+                 expected_source_ci=pre.source_ci, expected_trusted_sha='8' * 40)
         assert "| Profile |" not in report.body
 
 

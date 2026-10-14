@@ -9,6 +9,8 @@ from automation.test_agent.context import (CandidateTest, ChangedFile, ContextBu
                                           Evidence, WorkflowIdentity)
 from automation.test_agent.contracts import Target
 from automation.test_agent.provider import Stage, canonical, digest, strict_json
+from automation.test_agent.repair import language_contract
+from automation.test_agent.subjects import required_subject_import
 
 
 FRONTEND_CODE = """import { render, screen } from '@testing-library/react'
@@ -95,7 +97,10 @@ def decisions_for(bundle, actions=None):
         if any(f.path == 'backend/app/health.py' for f in bundle.changed_files) and target == Target.BACKEND:
             action = actions.get(str(target), 'no-tests-needed')
         paths = [c.path for c in bundle.candidate_tests if c.path.startswith(str(target) + '/')]
-        result.append({'target': str(target), 'action': action, 'plan': {
+        result.append({'target': str(target), 'action': action,
+            'selected_source_path': (
+                next(e.path for e in bundle.sources if e.path.startswith('frontend/'))
+                if target == Target.FRONTEND and action in ('generate', 'update') else None), 'plan': {
             'changed_behavior': 'Validate observable boundary behavior',
             'existing_test_evidence': existing, 'rationale': 'Compare changed behavior with existing coverage',
             'intended_test_files': paths if action in ('generate', 'update') else [],
@@ -108,7 +113,7 @@ def _binding(bundle, stage, target, payload):
     from automation.test_agent.protocol import stage_shape
     return digest(canonical({'source': asdict(bundle.source), 'context_sha256': bundle.sha256,
                              'stage': stage, 'target': target, 'input': payload,
-                             'response_shape_sha256': digest(canonical(stage_shape(stage)))}))
+                             'response_shape_sha256': digest(canonical(stage_shape(stage, target)))}))
 
 
 def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
@@ -120,15 +125,23 @@ def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
         projection = strict_json(project_context(bundle, target).decode(), 16384)
         response = {'binding': _binding(bundle, Stage.DECISION, target, projection),
                     'target': str(target), 'action': decision['action'],
+                    **({'selected_source_path': decision.get('selected_source_path')} if target == Target.FRONTEND else {}),
                     **{k: v for k, v in plan.items() if k != 'skill_ids'}}
         result.append(canonical(response).decode())
         if decision['action'] not in ('generate', 'update'):
             continue
-        projection = strict_json(project_context(bundle, target, plan['intended_test_files']).decode(), 16384)
+        projection = strict_json(project_context(bundle, target, plan['intended_test_files'], decision.get('selected_source_path')).decode(), 16384)
         originals = {e['path']: e['content_sha256'] for e in projection['existing_tests']
                      if e['state'] == 'available' and e.get('content') is not None}
         payload = {'decision': decision, 'evidence': projection,
-                   'permitted_test_paths': plan['intended_test_files'], 'original_sha256': originals}
+                   'permitted_test_paths': plan['intended_test_files'], 'original_sha256': originals,
+                   **({'required_subject_import': required_subject_import(
+                       plan['intended_test_files'][0], decision['selected_source_path'])}
+                      if target == Target.FRONTEND else {}),
+                   **({'test_operation': 'create' if decision['action'] == 'generate' else 'update'}
+                      if target == Target.FRONTEND else {}),
+                   **({'file_language': {p: language_contract(p) for p in plan['intended_test_files']}}
+                      if target == Target.FRONTEND else {})}
         edits = []
         for path in plan['intended_test_files']:
             code = (COUNT_CODE if 'TaskCount' in path else FRONTEND_CODE if target == Target.FRONTEND
@@ -139,23 +152,6 @@ def transcript(bundle, decisions=None, feedback=None, recommendation='accept'):
                           'original_sha256': originals.get(path), 'content': code})
         result.append(canonical({'binding': _binding(bundle, Stage.EDITS, target, payload),
                                  'target': str(target), 'edits': edits}).decode())
-    if feedback is not None:
-        edits = []
-        for raw in result:
-            value = strict_json(raw, 16384)
-            edits.extend([{**edit, 'target': value['target']} for edit in value.get('edits', [])])
-        proposal = {'schema_version': 1, 'source': asdict(bundle.source), 'decisions': decisions, 'edits': edits}
-        for target in Target:
-            if not any(e['target'] == str(target) for e in edits):
-                continue
-            summary = {'status': feedback.status, 'records': [{
-                'kind': r.kind, 'result': r.result, 'collected_tests': r.collected_tests,
-                'exit_code': r.exit_code, 'output_bytes': r.output_bytes,
-            } for r in feedback.verifier_results]}
-            payload = {'proposal_sha256': digest(canonical(proposal)), 'verification': summary}
-            result.append(canonical({'binding': _binding(bundle, Stage.VERIFICATION, target, payload),
-                                     'target': str(target), 'recommendation': recommendation,
-                                     'interpretation': 'Model recommends acceptance'}).decode())
     return tuple(result)
 
 

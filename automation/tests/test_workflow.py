@@ -233,9 +233,9 @@ def test_actual_agent_policy_verifier_feedback_flow_and_memory_lifetime(tmp_path
             events.append("source-cleanup")
     monkeypatch.setattr(w, "collect_context", lambda *_a, **_k: bundle)
     facts, artifact = w.execute(pre, gate_reader(pre), source_factory=Source, runtime_factory=Runtime, verifier_factory=Verifier)
-    assert events == ["start", "stop", "verify", "restart", "cleanup", "source-cleanup"]
+    assert events == ["start", "stop", "verify", "cleanup", "source-cleanup"]
     assert facts["status"] == status.upper().replace("-", "_") and facts["verification"] is not None
-    assert len(provider.requests) == 3  # Real T04 decision/edits/verification handshake.
+    assert len(provider.requests) == 2  # Trusted verifier verdict requires no model call.
     assert artifact.patch_preparation.value == "PREPARED"
     assert not (tmp_path / facts["edits"][0]["path"]).exists()  # Proposed code never runs/writes on host.
     raw = encode(pre.identity, pre.source, pre.source_ci, "8" * 40, facts)
@@ -434,7 +434,8 @@ def test_expected_pipeline_failures_and_no_edit_keep_truthful_facts(tmp_path, mo
         assert facts['status'] == 'UNAVAILABLE' and len(provider.requests) == 2
         assert 'restart' not in events and 'verify' in events
     elif mode == 'feedback-unavailable':
-        assert facts['status'] == 'AGENT_FAILED'
+        assert facts['status'] == 'VERIFIED'
+        assert 'restart' not in events and len(provider.requests) == 2
         assert 'Host verification: **VERIFIED**' in prepared.body
     elif mode == 'artifact-unavailable':
         assert facts['status'] == 'VERIFIED' and artifact is None and not facts['patch_prepared']

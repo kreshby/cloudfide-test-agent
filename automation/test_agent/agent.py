@@ -1,23 +1,27 @@
 """Advisory UnitTestAgent with explicit, bounded, host-controlled stages."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
+import re
 import time
 
 from .context import ContextBundle
 from .contracts import (ContractError, HostResult, ModelAction, ModelProposal,
                         PolicyDecision, ProposedEdit, Target, TargetDecision, TestPlan)
 from .patches import PolicyAssessment, assess_proposal
-from .policy import MAX_EDITED_FILES, PolicyError, test_path
+from .policy import MAX_EDITED_FILES, PolicyError, check_weakening, test_path
+from .repair import CompilerFailure, REPAIR_INSTRUCTIONS, language_contract
 from .provider import (COMPLETION_TOKENS, MAX_CALL_SECONDS, RESPONSE_LIMITS, Provider,
                        ProviderError, ProviderRequest, Stage, canonical, digest, strict_json)
 from .skills import SkillError, load_skill
 from .diagnostics import Diagnostic, safe_diagnostic
 from .protocol import MAX_INTENDED_TEST_FILES, stage_schema, stage_shape
+from .subjects import captured_frontend_subjects, required_subject_import
 
 
-MAX_PROVIDER_CALLS = 6
-MAX_STAGE_ROUNDS = 1  # Per (stage, target); no retries or automatic repair.
+MAX_PROVIDER_CALLS = 5
+MAX_STAGE_ROUNDS = 1  # Per (stage, target), including the single frontend repair.
+MAX_FRONTEND_REPAIRS = 1
 MAX_ACTIVE_SECONDS = 1000
 MAX_PROJECTION_BYTES = 16 * 1024
 MAX_TRACE_EVENTS = 48
@@ -62,6 +66,7 @@ class State(StrEnum):
     PROPOSAL_READY = "proposal-ready"
     AWAITING_VERIFICATION = "awaiting-verification"
     REVIEWING_VERIFICATION = "reviewing-verification"
+    REPAIRING = "repairing"
     FINISHED = "finished"
     FAILED = "failed"
 
@@ -71,7 +76,8 @@ _TRANSITIONS = {
     State.DECIDING: frozenset({State.GENERATING_EDITS, State.PROPOSAL_READY}),
     State.GENERATING_EDITS: frozenset({State.DECIDING, State.PROPOSAL_READY}),
     State.PROPOSAL_READY: frozenset({State.AWAITING_VERIFICATION, State.FINISHED}),
-    State.AWAITING_VERIFICATION: frozenset({State.REVIEWING_VERIFICATION}),
+    State.AWAITING_VERIFICATION: frozenset({State.REVIEWING_VERIFICATION, State.REPAIRING}),
+    State.REPAIRING: frozenset({State.AWAITING_VERIFICATION}),
     State.REVIEWING_VERIFICATION: frozenset({State.FINISHED}),
     State.FINISHED: frozenset(),
     State.FAILED: frozenset(),
@@ -137,7 +143,7 @@ def _evidence(item, maximum):
     return value
 
 
-def project_context(bundle: ContextBundle, target: Target, intended=None) -> bytes:
+def project_context(bundle: ContextBundle, target: Target, intended=None, selected_source_path=None) -> bytes:
     """Deterministic stack projection with a fixed global test-content budget.
 
     Edits restrict existing tests/candidates to accepted intended paths. Source
@@ -164,8 +170,8 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
                    and e.content is not None and len(e.content.encode("utf-8")) <= 4096}
     # A complete diff plus historical source is sufficient for comparison,
     # but edit generation needs the exact current API of the named subject.
-    # Derive subjects only from accepted test paths and captured T03 sources;
-    # no filesystem discovery or larger projection allowance is introduced.
+    # Frontend selection is explicit; retain the established backend projection.
+    # Neither discovers files or enlarges the projection allowance.
     subjects = set()
     if intended is not None:
         paths = set()
@@ -176,11 +182,13 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
                                          or len(original.content.encode("utf-8")) > 4096):
                 continue  # An incomplete original cannot authorize an edit.
             name = path.rsplit("/", 1)[-1]
-            if target == Target.FRONTEND:
-                paths.add(path.replace(".test.", ".").replace(".spec.", "."))
-            elif name.startswith("test_"):
+            if target == Target.BACKEND and name.startswith("test_"):
                 directory = path.rsplit("/", 1)[0].replace("backend/tests", "backend/app", 1)
                 paths.add(directory + "/" + name[5:])
+        if target == Target.FRONTEND and selected_source_path is not None:
+            if selected_source_path not in captured_frontend_subjects(bundle):
+                raise AgentError("selected source outside captured changed sources", diagnostic=Diagnostic.PATH)
+            paths.add(selected_source_path)
         subjects = {e.path for e in bundle.sources if _target_path(e.path, target)
                     and e.path in paths and e.source_sha == bundle.source.head_sha
                     and e.state == "available" and e.content is not None
@@ -194,7 +202,7 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
     contents = {}
     for evidence in test_evidence:
         if evidence["content"] is not None:
-            contents[evidence["path"]] = (evidence["content"], evidence["state"])
+            contents[evidence["path"]] = (evidence["content"], evidence["state"], evidence.pop("content_sha256"))
             evidence["content"] = None
             evidence["state"] = "projection-clipped"
     value = {
@@ -215,6 +223,8 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
         "fixtures": [_evidence(e, 2048) for e in sorted(bundle.fixtures, key=lambda e: e.path)
                      if _target_path(e.path, target)],
         "markers": sorted(bundle.markers),
+        **({"selectable_source_paths": list(captured_frontend_subjects(bundle))}
+           if target == Target.FRONTEND else {}),
     }
     # Exact head is already supplied once in source. Historical evidence keeps
     # its separate SHA; the complete T03 snapshot remains digest-bound.
@@ -234,12 +244,13 @@ def project_context(bundle: ContextBundle, target: Target, intended=None) -> byt
         original = contents.get(evidence["path"])
         if original is None:
             continue
-        evidence["content"], evidence["state"] = original
+        evidence["content"], evidence["state"], evidence["content_sha256"] = original
         trial = canonical(value)
         if len(trial) <= MAX_PROJECTION_BYTES:
             raw = trial
         else:
             evidence["content"], evidence["state"] = None, "projection-clipped"
+            evidence.pop("content_sha256")
     return raw
 
 
@@ -274,6 +285,7 @@ class UnitTestAgent:
         self._deadline = 0.0
         self._calls = 0
         self._rounds = set()
+        self._repair_attempts = 0
         self._state = State.INITIAL
         self._trace = []
         self._trace_bytes = 0
@@ -335,11 +347,17 @@ class UnitTestAgent:
         loaded = tuple(load_skill(identifier, target) for identifier in skill_ids)
         payload = {"source": asdict(self._bundle.source), "context_sha256": self._context_digest,
                    "stage": stage, "target": target, "input": payload,
-                   "response_shape_sha256": digest(canonical(stage_shape(stage)))}
+                   "response_shape_sha256": digest(canonical(stage_shape(stage, target)))}
         binding = digest(canonical(payload))
         payload["binding"] = binding
         response_schema = stage_schema(stage, target, binding, payload["input"])
         system = UNIT_TEST_AGENT + "\n" + "\n".join(s.body for s in loaded) + (
+            "\nFor a NEW frontend test, statically import selected_source_path using exactly "
+            "the host-provided required_subject_import module specifier. Use actual captured "
+            "exports/signatures from selected_source_path. Do not replace it with a neighboring "
+            "page/component/barrel. For updates, preserve established import relationships.\n"
+            if stage == Stage.EDITS and target == Target.FRONTEND else "") + (
+            REPAIR_INSTRUCTIONS if stage == Stage.REPAIR else "") + (
             "\nResponse JSON schema (all fields required; no extra fields):\n" +
             canonical(response_schema).decode())
         request = ProviderRequest(stage, target, binding, system, canonical(payload).decode())
@@ -368,8 +386,8 @@ class UnitTestAgent:
             raise AgentError("stale stage binding or target", diagnostic=Diagnostic.BINDING)
         return value
 
-    def _projection(self, target, intended=None):
-        raw = project_context(self._bundle, target, intended)
+    def _projection(self, target, intended=None, selected_source_path=None):
+        raw = project_context(self._bundle, target, intended, selected_source_path)
         self._event("projection", target=target, projection_sha256=digest(raw),
                     projection_bytes=len(raw), purpose="decision" if intended is None else "edits")
         return strict_json(raw.decode(), MAX_PROJECTION_BYTES)
@@ -398,6 +416,7 @@ class UnitTestAgent:
                 if len(plan.intended_test_files) > MAX_INTENDED_TEST_FILES:
                     raise AgentError("decision path count limit", diagnostic=Diagnostic.PATH)
                 decision = TargetDecision.from_mapping({"target": str(target), "action": response["action"],
+                    "selected_source_path": response.get("selected_source_path"),
                                                         "plan": asdict(plan) | {
                     "existing_test_evidence": list(plan.existing_test_evidence),
                     "intended_test_files": list(plan.intended_test_files), "skill_ids": list(plan.skill_ids)}})
@@ -408,9 +427,13 @@ class UnitTestAgent:
                 if decision.action == ModelAction.NO_TESTS_NEEDED and not plan.existing_test_evidence:
                     raise AgentError("no-tests-needed requires existing coverage evidence", diagnostic=Diagnostic.EVIDENCE)
                 if decision.action in (ModelAction.NO_TESTS_NEEDED, ModelAction.UNSUPPORTED):
+                    if decision.selected_source_path is not None:
+                        raise AgentError("non-edit decision has source subject", diagnostic=Diagnostic.PATH)
                     if plan.intended_test_files:
                         raise AgentError("non-edit decision has intended edits", diagnostic=Diagnostic.PATH)
                 else:
+                    if target == Target.FRONTEND and decision.selected_source_path not in captured_frontend_subjects(self._bundle):
+                        raise AgentError("selected source outside captured changed sources", diagnostic=Diagnostic.PATH)
                     if not plan.intended_test_files:
                         raise AgentError("edit decision requires intended paths", diagnostic=Diagnostic.PATH)
                     for path in plan.intended_test_files:
@@ -418,7 +441,13 @@ class UnitTestAgent:
                         if path not in self._context.permitted_test_paths:
                             raise AgentError("intended path outside host context", diagnostic=Diagnostic.PATH)
                     self._transition(State.GENERATING_EDITS)
-                    edit_projection = self._projection(target, plan.intended_test_files)
+                    self._event("decision-accepted", target=target,
+                                selected_source_path=decision.selected_source_path,
+                                intended_test_files=list(plan.intended_test_files),
+                                **({"required_subject_import": required_subject_import(
+                                    plan.intended_test_files[0], decision.selected_source_path)}
+                                   if target == Target.FRONTEND else {}))
+                    edit_projection = self._projection(target, plan.intended_test_files, decision.selected_source_path)
                     originals = {e["path"]: e["content_sha256"] for e in edit_projection["existing_tests"]
                                  if e["state"] == "available" and e.get("content") is not None}
                     candidate_map = {c["path"]: c for c in edit_projection["candidate_tests"]}
@@ -427,6 +456,13 @@ class UnitTestAgent:
                     edit_response = self._ask(Stage.EDITS, target, {
                         "decision": asdict(decision), "evidence": edit_projection,
                         "permitted_test_paths": list(plan.intended_test_files), "original_sha256": originals,
+                        **({"required_subject_import": required_subject_import(
+                            plan.intended_test_files[0], decision.selected_source_path)}
+                           if target == Target.FRONTEND else {}),
+                        **({"test_operation": "create" if decision.action == ModelAction.GENERATE else "update"}
+                           if target == Target.FRONTEND else {}),
+                        **({"file_language": {p: language_contract(p) for p in plan.intended_test_files}}
+                           if target == Target.FRONTEND else {}),
                     }, (target_skill,))
                     if (type(edit_response["edits"]) is not list
                             or not 1 <= len(edit_response["edits"]) <= MAX_EDITED_FILES):
@@ -475,27 +511,91 @@ class UnitTestAgent:
             self._event("verification-received", feedback_sha256=digest(canonical(asdict(feedback))),
                         host_status=feedback.status)
             self._transition(State.REVIEWING_VERIFICATION)
-            for target in Target:
-                if not any(e.target == target for e in self._proposal.edits):
-                    continue
-                # Exclude arbitrary report references and logs from prompts/trace.
-                summary = {"status": feedback.status, "records": [{
-                    "kind": r.kind, "result": r.result, "collected_tests": r.collected_tests,
-                    "exit_code": r.exit_code, "output_bytes": r.output_bytes,
-                } for r in feedback.verifier_results]}
-                response = self._ask(Stage.VERIFICATION, target, {
-                    "proposal_sha256": digest(canonical(asdict(self._proposal))), "verification": summary,
-                }, ("verify-test-patch",))
-                if response["recommendation"] not in ("accept", "reject", "unavailable"):
-                    raise AgentError("unsupported verification recommendation")
-                _text(response["interpretation"], 512)
-                self._recommendations.append(response["recommendation"])
+            # The trusted verifier alone owns pass/fail. No model interpretation.
             self._remaining()
             self._transition(State.FINISHED)
         except (AgentError, ContractError, ProviderError, SkillError, PolicyError) as error:
             self._fail(str(error), safe_diagnostic(getattr(error, "diagnostic", None)))
         except UnicodeError:
             self._fail("invalid stage encoding")
+        finally:
+            self._active_seconds += self._clock() - started
+        return self.result()
+
+    def repair(self, feedback: CompilerFailure):
+        """One host-authorized replacement at the already accepted frontend path.
+
+        The verifier has finished and destroyed its sandbox before this call.
+        Returned source stays data until a fresh ordinary verification.
+        """
+        if self._state != State.AWAITING_VERIFICATION:
+            raise AgentError("repair requires awaiting verification")
+        started = self._clock()
+        self._deadline = started + MAX_ACTIVE_SECONDS - self._active_seconds
+        try:
+            if self._repair_attempts >= MAX_FRONTEND_REPAIRS:
+                raise AgentError("frontend repair attempt exhausted")
+            if type(feedback) is not CompilerFailure:
+                raise AgentError("trusted compiler feedback required", diagnostic=Diagnostic.VERIFIER)
+            feedback.__post_init__()
+            edits = [e for e in self._proposal.edits if e.target == Target.FRONTEND]
+            if (len(edits) != 1 or feedback.source != self._bundle.source
+                    or feedback.path != edits[0].path
+                    or feedback.previous_content_sha256 != digest(edits[0].content.encode())
+                    or feedback.changes_sha256 != digest(self._policy.changes.to_bytes())):
+                raise AgentError("repair source or edit binding mismatch", diagnostic=Diagnostic.BINDING)
+            self._repair_attempts += 1  # Consumed even when inference/validation fails.
+            self._transition(State.REPAIRING)
+            previous = edits[0]
+            decision = next(d for d in self._proposal.decisions if d.target == Target.FRONTEND)
+            response = self._ask(Stage.REPAIR, Target.FRONTEND, {
+                "attempt": self._repair_attempts, "accepted_path": previous.path,
+                "test_operation": str(previous.operation),
+                "previous_content": previous.content,
+                "previous_content_sha256": feedback.previous_content_sha256,
+                "changes_sha256": feedback.changes_sha256,
+                "verification_sha256": feedback.verification_sha256,
+                "diagnostics_sha256": feedback.sha256,
+                "diagnostics": [asdict(d) for d in feedback.diagnostics],
+                **language_contract(previous.path),
+                "selected_source_path": decision.selected_source_path,
+                "evidence": self._projection(Target.FRONTEND, [previous.path], decision.selected_source_path),
+                "decision": asdict(decision),
+            }, ("frontend-unit-tests",))
+            content = response["replacement_content"]
+            if type(content) is not str or not content.strip() or "```" in content:
+                raise AgentError("repair replacement content rejected", diagnostic=Diagnostic.SCHEMA)
+            if digest(content.encode()) == feedback.previous_content_sha256:
+                self._event("repair-rejected", reason="byte-identical-replacement",
+                            path=previous.path, selected_source_path=decision.selected_source_path,
+                            content_sha256=feedback.previous_content_sha256)
+                raise AgentError("byte-identical repair rejected", diagnostic=Diagnostic.POLICY)
+            replacement = replace(previous, content=content)
+            if replacement.path != feedback.path:
+                raise AgentError("repair path mismatch", diagnostic=Diagnostic.PATH)
+            check_weakening(Target.FRONTEND, previous.content.encode(), content.encode())
+            # Also preserve the recognizable assertion count of the generated test.
+            assertions = r"\b(?:expect|assert)\s*\("
+            if len(re.findall(assertions, content)) < len(re.findall(assertions, previous.content)):
+                raise PolicyError("repair removes assertions")
+            proposal = replace(self._proposal, edits=tuple(
+                replacement if e.path == previous.path else e for e in self._proposal.edits))
+            policy = assess_proposal(_proposal_payload(proposal), self._context)
+            if policy.decision != PolicyDecision.ACCEPTED:
+                raise AgentError("repair test policy rejected", diagnostic=Diagnostic.POLICY)
+            self._proposal, self._policy = proposal, policy
+            self._event("repair-accepted", attempt=self._repair_attempts,
+                        path=previous.path, selected_source_path=decision.selected_source_path,
+                        previous_content_sha256=feedback.previous_content_sha256,
+                        replacement_content_sha256=digest(content.encode()),
+                        diagnostics_sha256=feedback.sha256,
+                        proposal_sha256=digest(canonical(asdict(proposal))))
+            self._remaining()
+            self._transition(State.AWAITING_VERIFICATION)
+        except (AgentError, ContractError, ProviderError, SkillError, PolicyError, ValueError) as error:
+            self._fail("frontend repair failed", safe_diagnostic(getattr(error, "diagnostic", None)))
+        except UnicodeError:
+            self._fail("invalid repair encoding")
         finally:
             self._active_seconds += self._clock() - started
         return self.result()

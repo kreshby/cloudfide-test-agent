@@ -42,13 +42,13 @@ SELECTED_RUNTIME = RuntimePin()
 class Stage(StrEnum):
     DECISION = "decision"
     EDITS = "edits"
-    VERIFICATION = "verification"
+    REPAIR = "repair"
 
 
 COMPLETION_TOKENS = MappingProxyType({Stage.DECISION: 256, Stage.EDITS: 768,
-                                     Stage.VERIFICATION: 192})
+                                     Stage.REPAIR: 768})
 RESPONSE_LIMITS = MappingProxyType({Stage.DECISION: 4096, Stage.EDITS: MAX_RESPONSE_BYTES,
-                                  Stage.VERIFICATION: 2048})
+                                  Stage.REPAIR: MAX_RESPONSE_BYTES})
 
 
 class ProviderError(ValueError):

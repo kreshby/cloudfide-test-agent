@@ -125,7 +125,7 @@ def test_actual_skill_bodies_and_hashes_in_exact_captured_requests(tmp_path):
     assert agent.run().state == State.AWAITING_VERIFICATION
     result = agent.resume(feedback)
     events = [json.loads(e) for e in result.trace if json.loads(e)['event'] == 'request']
-    assert len(events) == len(provider.requests) == 3
+    assert len(events) == len(provider.requests) == 2
     for request, event in zip(provider.requests, events):
         assert event['request_sha256'] == digest(request.to_bytes())
         assert event['system_sha256'] == digest(request.system.encode())
@@ -134,12 +134,12 @@ def test_actual_skill_bodies_and_hashes_in_exact_captured_requests(tmp_path):
             assert loaded.body in request.system
             assert loaded.record.content_sha256 == loaded.record.loaded_content_sha256
             assert record == json.loads(canonical(asdict(loaded.record)))
-    assert any(r['skill_id'] == 'verify-test-patch' for e in events for r in e['skills'])
+    assert not any(r['skill_id'] == 'verify-test-patch' for e in events for r in e['skills'])
 
 
 @pytest.mark.parametrize('case,target', [('frontend-generate', Target.FRONTEND),
                                        ('backend-update', Target.BACKEND)])
-@pytest.mark.parametrize('stage', list(Stage))
+@pytest.mark.parametrize('stage', [Stage.DECISION, Stage.EDITS])
 def test_response_schema_prompts_use_exact_constants_and_separate_enums(tmp_path, case, target, stage):
     bundle = bundle_for(case)
     feedback = feedback_for(bundle)
@@ -180,7 +180,7 @@ def test_response_schema_prompts_use_exact_constants_and_separate_enums(tmp_path
         skill_ids = ('verify-test-patch',)
     for skill_id in skill_ids:
         assert skills.load_skill(skill_id, target).body in request.system
-    assert final.provider_calls == 3
+    assert final.provider_calls == 2
     assert initial.proposal == final.proposal
 
 
@@ -220,8 +220,9 @@ def test_stale_binding_or_target_rejected_in_every_initial_stage(tmp_path, field
 
 def test_response_bound_to_another_source_cannot_select_source(tmp_path):
     bundle = bundle_for('frontend-generate')
-    stale = replace(bundle, source=replace(bundle.source, head_sha='9' * 40))
-    _, _, agent = make_agent(tmp_path, responses=transcript(stale))
+    stale = replace(bundle, source=replace(bundle.source, head_sha='9' * 40),
+                    sources=tuple(replace(e, source_sha='9' * 40) for e in bundle.sources))
+    _, _, agent = make_agent(tmp_path, responses=transcript(stale)[:1])
     assert agent.run().state == State.FAILED
 
 
@@ -293,7 +294,7 @@ def test_model_success_recommendation_cannot_override_host_failure_or_not_run(tm
     agent.run()
     final = agent.resume(feedback)
     assert final.state == State.FINISHED
-    assert final.recommendations == ('accept',)
+    assert final.recommendations == ()
     assert final.outcome == str(status)
     assert final.outcome != 'verified'
     assert final.host_result == feedback
@@ -320,16 +321,17 @@ def test_host_contract_requires_real_baseline_and_patched_records():
 
 @pytest.mark.parametrize('change', [{'binding': '0' * 64}, {'tool': 'shell'},
                                   {'recommendation': 'verified'}, {'status': 'verified'}])
-def test_verification_response_binding_and_strict_shape(tmp_path, change):
+def test_obsolete_model_verification_response_is_never_consumed(tmp_path, change):
     bundle = bundle_for('frontend-generate')
     feedback = feedback_for(bundle)
     responses = list(transcript(bundle, feedback=feedback))
-    responses[2] = mutate(responses[2], **change)
+    responses.append(canonical(change).decode())
     _, _, agent = make_agent(tmp_path, responses=tuple(responses))
     agent.run()
     result = agent.resume(feedback)
-    assert result.state == State.FAILED
+    assert result.state == State.FINISHED
     assert result.host_result is feedback
+    assert result.provider_calls == 2
 
 
 def test_call_and_round_limits_fail_without_extra_inference(tmp_path, monkeypatch):
@@ -347,7 +349,7 @@ def test_call_and_round_limits_fail_without_extra_inference(tmp_path, monkeypatc
     assert len(provider.requests) == 0
 
 
-def test_both_targets_with_edits_use_exactly_six_stages_including_feedback(tmp_path):
+def test_both_targets_with_edits_use_exactly_four_model_calls(tmp_path):
     bundle = bundle_for('mixed-stack')
     feedback = feedback_for(bundle)
     decisions = decisions_for(bundle, {'backend': 'update'})
@@ -355,7 +357,7 @@ def test_both_targets_with_edits_use_exactly_six_stages_including_feedback(tmp_p
     assert agent.run().state == State.AWAITING_VERIFICATION
     result = agent.resume(feedback)
     assert result.state == State.FINISHED
-    assert result.provider_calls == len(provider.requests) == 6
+    assert result.provider_calls == len(provider.requests) == 4
 
 
 def test_wall_and_per_call_time_budgets(tmp_path):
@@ -567,8 +569,8 @@ def test_canonical_t03_bundle_loader_roundtrip():
     assert load_host_bundle(real_t03.to_bytes(), real_t03.sha256) == real_t03
 
 
-@pytest.mark.parametrize('stage_index,maximum', [(1, 16384), (2, 2048)])
-def test_edit_and_review_raw_response_byte_limits(tmp_path, stage_index, maximum):
+@pytest.mark.parametrize('stage_index,maximum', [(1, 16384)])
+def test_edit_raw_response_byte_limits(tmp_path, stage_index, maximum):
     bundle = bundle_for('frontend-generate')
     feedback = feedback_for(bundle)
     responses = list(transcript(bundle, feedback=feedback))
@@ -600,11 +602,11 @@ def test_loaded_registry_path_traversal_fails_even_if_host_entry_is_corrupt(monk
 
 
 def test_agent_budget_constants_and_no_executable_capabilities():
-    assert module.MAX_PROVIDER_CALLS == 6
+    assert module.MAX_PROVIDER_CALLS == 5
     assert module.MAX_STAGE_ROUNDS == 1
     assert module.MAX_ACTIVE_SECONDS == 1000
     assert module.MAX_CALL_SECONDS == 300
-    assert module.COMPLETION_TOKENS == {Stage.DECISION: 256, Stage.EDITS: 768, Stage.VERIFICATION: 192}
+    assert module.COMPLETION_TOKENS == {Stage.DECISION: 256, Stage.EDITS: 768, Stage.REPAIR: 768}
     root = Path(module.__file__).parent
     forbidden_imports = {'subprocess', 'importlib', 'pickle', 'shutil'}
     forbidden_calls = {'eval', 'exec', 'compile', '__import__', 'system', 'popen', 'write_text', 'write_bytes'}

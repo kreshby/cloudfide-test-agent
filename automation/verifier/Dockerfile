@@ -9,7 +9,7 @@ COPY requirements.txt /opt/requirements.txt
 RUN python -m pip install --no-cache-dir -r /opt/requirements.txt
 COPY --from=frontend /usr/local/bin/node /usr/local/bin/node
 COPY --from=frontend /opt/frontend /opt/frontend
-COPY runner.py profiles.py /opt/verifier/
+COPY runner.py profiles.py structural.cjs /opt/verifier/
 COPY pytest_evidence.py /usr/local/lib/python3.12/site-packages/verifier_pytest.py
 ENV PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8
 USER 10001:10001

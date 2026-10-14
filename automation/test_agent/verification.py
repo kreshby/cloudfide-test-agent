@@ -26,6 +26,9 @@ from automation.verifier.profiles import PROFILES, STACK_PROFILES, command
 from .contracts import (EditOperation, ExecutionKind, ExecutionResult,
                         FinalHostStatus, HostResult, SourceIdentity, Target, VerifierResult)
 from .patches import TrustedChanges
+from .repair import CompilerFailure, compiler_diagnostics
+from .repair import language_contract
+from .subjects import frontend_source
 from .policy import (CREATE_FILE_MODE, MAX_EDITED_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES,
                      SUPPORTED_FILE_MODES, PolicyError, ValidatedEdit,
                      check_weakening, normalized_path, test_path)
@@ -378,6 +381,15 @@ def _changes(changes, source):
             raise VerificationError("invalid create metadata")
     if sum(len(e.content) for e in changes.edits) > MAX_TOTAL_BYTES:
         raise VerificationError("accepted edit total byte limit")
+    frontend = {e.path for e in changes.edits if e.target == Target.FRONTEND}
+    if (type(changes.frontend_subjects) is not tuple
+            or any(type(pair) is not tuple or len(pair) != 2 for pair in changes.frontend_subjects)
+            or len(dict(changes.frontend_subjects)) != len(changes.frontend_subjects)
+            or set(dict(changes.frontend_subjects)) != frontend):
+        raise VerificationError("frontend edits require exact source subjects")
+    for path, subject in changes.frontend_subjects:
+        if not frontend_source(subject):
+            raise VerificationError("invalid frontend source subject")
 
 
 def snapshot(executor, root, source, changes):
@@ -558,6 +570,7 @@ def build_entries():
     for dest, source in {
         "Dockerfile": "automation/verifier/Dockerfile", "runner.py": "automation/verifier/runner.py",
         "profiles.py": "automation/verifier/profiles.py", "pytest_evidence.py": "automation/verifier/pytest_evidence.py",
+        "structural.cjs": "automation/verifier/structural.cjs",
         "package.json": "frontend/package.json", "package-lock.json": "frontend/package-lock.json",
         "requirements.txt": "backend/requirements.txt",
     }.items():
@@ -702,6 +715,8 @@ class Sandbox:
         relative = _paths(paths, Target(p.stack))
         if p.command_id == "tsc" and paths:
             raise VerificationError("typecheck does not accept executable arguments")
+        if p.command_id == "structural" and paths:
+            raise VerificationError("structural profile accepts only host-bound manifest")
         name, container = "t05-" + uuid.uuid4().hex, None
         try:
             raw = checked(self.executor, create_argv(name, self.image.image_id, root))
@@ -720,7 +735,7 @@ class Sandbox:
             if result.timed_out:
                 return result, {}, "sandbox wall timeout"
             reports, error = {}, None
-            if p.command_id != "tsc":
+            if p.command_id not in {"tsc", "structural"}:
                 exported = self.executor.run((*DOCKER, "exec", container, "/usr/local/bin/python3.12", "-I",
                                               "/opt/verifier/runner.py", "export", profile_id),
                                              limit=2 * MAX_TRANSFER_BYTES)
@@ -889,6 +904,45 @@ class CommandEvidence:
     counts: Counts | None
     error: str | None
     passed: bool
+    structural: tuple[dict, ...] = ()
+
+
+STRUCTURAL_WARNINGS = frozenset({"selected-subject-not-directly-imported"})
+STRUCTURAL_CATEGORIES = frozenset({"syntax-invalid", "jsx-not-allowed", "unsafe-import-path"}) | STRUCTURAL_WARNINGS
+
+
+def structural_contracts(source, changes):
+    subjects = dict(changes.frontend_subjects)
+    return tuple({"source": asdict(source), "changes_sha256": digest(changes.to_bytes()),
+                  "path": e.path, "selected_source_path": subjects[e.path],
+                  "content_sha256": digest(e.content), "operation": str(e.operation),
+                  **language_contract(e.path)} for e in changes.edits if e.target == Target.FRONTEND)
+
+
+def validate_structural(value, expected):
+    """Only bounded parser facts cross the sandbox. No messages/source excerpts."""
+    if type(value) is not list or len(value) != len(expected) or len(value) > MAX_EDITED_FILES:
+        raise ReportError("structural result inventory mismatch")
+    for fact, contract in zip(value, expected):
+        if (type(fact) is not dict or set(fact) != set(contract) | {
+                "validator", "syntax_diagnostics", "jsx_nodes", "subject_imported", "categories", "passed"}
+                or any(type(fact[k]) is not type(v) or fact[k] != v for k, v in contract.items())
+                or fact["validator"] != "typescript-structural-v1"
+                or type(fact["subject_imported"]) is not bool or type(fact["passed"]) is not bool
+                or type(fact["categories"]) is not list
+                or any(type(c) is not str or c not in STRUCTURAL_CATEGORIES for c in fact["categories"])
+                or len(set(fact["categories"])) != len(fact["categories"])):
+            raise ReportError("structural result binding mismatch")
+        for key in ("syntax_diagnostics", "jsx_nodes"):
+            if type(fact[key]) is not int or not 0 <= fact[key] <= 65536:
+                raise ReportError("invalid structural count")
+        categories = set(fact["categories"])
+        if (("syntax-invalid" in categories) != bool(fact["syntax_diagnostics"])
+                or ("jsx-not-allowed" in categories) != (not fact["jsx_allowed"] and bool(fact["jsx_nodes"]))
+                or ("selected-subject-not-directly-imported" in categories) != (not fact["subject_imported"])
+                or fact["passed"] != (not (categories - STRUCTURAL_WARNINGS))):
+            raise ReportError("contradictory structural facts")
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -899,12 +953,15 @@ class VerificationReport:
     commands: tuple[CommandEvidence, ...]
     reason: str | None
     output_directory: Path  # Host-only handle; excluded from portable metadata.
+    compiler_failure: CompilerFailure | None = None
 
     def to_bytes(self):
         return canonical({"host_result": asdict(self.host_result), "changes_sha256": self.changes_sha256,
                           "image": None if self.image is None else {
                               k: v for k, v in asdict(self.image).items() if k != "build_output"},
-                          "commands": [asdict(c) for c in self.commands], "reason": self.reason})
+                          "commands": [asdict(c) for c in self.commands], "reason": self.reason,
+                          "compiler_failure": (None if self.compiler_failure is None else
+                                               asdict(self.compiler_failure))})
 
 
 class Verifier:
@@ -923,18 +980,24 @@ class Verifier:
             raise VerificationError("required stack profile omitted")
         output = Path(tempfile.mkdtemp(prefix="t05-evidence-"))
         commands, records, reason = [], [], None
+        compiler_failure = None
         changes_digest = digest(changes.to_bytes())
         status = FinalHostStatus.UNAVAILABLE
         try:
             if changes.source != source:
                 raise Stale("accepted changes source mismatch")
             files = snapshot(self.executor, repository_root, source, changes)
+            contracts = structural_contracts(source, changes)
+            if any(c["selected_source_path"] not in files or c["selected_source_path"] not in changes.changed_files
+                   for c in contracts):
+                raise Stale("selected source absent from snapshot")
             image = image or build_image(self.executor)
             env = validate_image(self.executor, image)
             validate_daemon(self.executor)
             sandbox = Sandbox(self.executor, image, env)
             with tempfile.TemporaryDirectory(prefix="t05-input-") as directory:
                 roots = prepare_states(Path(directory), files, changes)
+                (roots[ExecutionKind.PATCHED] / "structural-input.json").write_bytes(canonical(contracts))
                 updates = {e.path for e in changes.edits if e.operation == EditOperation.UPDATE}
                 full = {target: tuple(sorted(p for p in files if recognized(p, target))) for target in Target}
                 patched = {target: tuple(sorted(set(full[target]) | {e.path for e in changes.edits if e.target == target})) for target in Target}
@@ -945,8 +1008,10 @@ class Verifier:
                 for index, step in enumerate(steps):
                     p = PROFILES[step]
                     target, kind = Target(p.stack), ExecutionKind(p.kind)
-                    if p.command_id == "tsc":
+                    if p.command_id in {"tsc", "structural"}:
                         paths = ()
+                        if p.command_id == "structural" and not contracts:
+                            continue
                     elif kind == ExecutionKind.BASELINE:
                         paths = tuple(path for path in full[target] if path not in updates)
                     elif p.targeted:
@@ -955,10 +1020,23 @@ class Verifier:
                             continue
                     else:
                         paths = patched[target]
-                    if not paths and p.command_id != "tsc":
+                    if not paths and p.command_id not in {"tsc", "structural"}:
                         # Never fall back to implicit discovery or manufacture a count.
                         raise Unsupported("empty baseline guard inventory")
                     result, reports, error = sandbox.execute(step, roots[kind], paths)
+                    structural = ()
+                    if p.command_id == "structural":
+                        try:
+                            if result.timed_out or result.truncated:
+                                raise ReportError("structural result unavailable")
+                            structural = validate_structural(parse_json(result.stdout, 8192), contracts)
+                            if result.exit_code != (0 if all(f["passed"] for f in structural) else 1):
+                                raise ReportError("structural exit mismatch")
+                            reports = {"structural.json": canonical(structural)}
+                            if not all(f["passed"] for f in structural):
+                                error = "generated-test-structural-failure"
+                        except ReportError:
+                            error = "structural-result-invalid"
                     references = []
                     for name, data in reports.items():
                         reference = f"reports/{index}/" + name
@@ -967,7 +1045,7 @@ class Verifier:
                         dest.write_bytes(data)
                         references.append((reference, len(data), digest(data)))
                     counts = None
-                    if p.command_id != "tsc" and not error:
+                    if p.command_id not in {"tsc", "structural"} and not error:
                         try:
                             counts = (frontend_counts(reports["tests.json"], paths) if target == Target.FRONTEND else
                                       backend_counts(reports["tests.xml"], reports["collection.json"], paths))
@@ -978,18 +1056,18 @@ class Verifier:
                         except (ReportError, KeyError):
                             error = "framework report validation failed"
                     passed = (not error and not result.timed_out and result.exit_code == 0
-                              and (p.command_id == "tsc" or (counts is not None and counts.collected > 0
+                              and (p.command_id in {"tsc", "structural"} or (counts is not None and counts.collected > 0
                                    and counts.passed > 0 and not counts.failed and not counts.errors
                                    and all(n > 0 for _, n in counts.files))))
                     evidence = CommandEvidence(step, p.command_id, kind, image.image_id, source.head_sha,
                                                changes_digest, result.duration, result.exit_code, result.timed_out,
                                                result.stdout_bytes, result.stderr_bytes, result.stdout_sha256,
-                                               result.stderr_sha256, tuple(references), counts, error, passed)
+                                               result.stderr_sha256, tuple(references), counts, error, passed, structural)
                     commands.append(evidence)
                     evidence_ref = f"commands/{index}.json"
                     (output / "commands").mkdir(exist_ok=True)
                     (output / evidence_ref).write_bytes(canonical(asdict(evidence)))
-                    if p.command_id != "tsc":
+                    if p.command_id not in {"tsc", "structural"}:
                         outcome = (ExecutionResult.PASSED if passed else ExecutionResult.TIMEOUT if result.timed_out
                                    else ExecutionResult.FAILED if result.exit_code not in (0, None) else ExecutionResult.ERROR)
                         records.append(VerifierResult(step, p.command_id, kind, outcome,
@@ -999,7 +1077,22 @@ class Verifier:
                     if not passed:
                         status = (FinalHostStatus.BASELINE_FAILED if kind == ExecutionKind.BASELINE
                                   else FinalHostStatus.VERIFICATION_FAILED)
-                        reason = "required baseline guard failed" if kind == ExecutionKind.BASELINE else "required patched verification failed"
+                        reason = ("generated-test-structural-failure" if p.command_id == "structural" else
+                                  "required baseline guard failed" if kind == ExecutionKind.BASELINE else
+                                  "required patched verification failed")
+                        frontend_edits = [e for e in changes.edits if e.target == Target.FRONTEND]
+                        guards = {c.profile_id for c in commands[:-1] if c.passed}
+                        if (step == "frontend-patched-typecheck" and result.exit_code == 2
+                                and not result.timed_out and not result.truncated and not error
+                                and len(frontend_edits) == 1
+                                and {"frontend-baseline-typecheck", "frontend-baseline-suite"} <= guards
+                                and all(c.passed for c in commands[:-1])):
+                            edit = frontend_edits[0]
+                            diagnostics = compiler_diagnostics(result.stdout, result.stderr, edit.path, edit.content)
+                            if diagnostics:
+                                compiler_failure = CompilerFailure(
+                                    source, edit.path, changes_digest, digest(edit.content),
+                                    digest(canonical([asdict(c) for c in commands])), diagnostics)
                         break
         except Stale:
             status, reason = FinalHostStatus.STALE, "source or accepted edit mismatch"
@@ -1010,6 +1103,6 @@ class Verifier:
         except (ReportError, PolicyError, UnicodeError, ValueError):
             status, reason = FinalHostStatus.STALE, "unsafe source or accepted changes"
         report = VerificationReport(HostResult(source, status, tuple(records)), changes_digest,
-                                    image, tuple(commands), reason, output)
+                                    image, tuple(commands), reason, output, compiler_failure)
         (output / "verification.json").write_bytes(report.to_bytes())
         return report
